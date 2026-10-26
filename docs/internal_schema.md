@@ -1,7 +1,73 @@
 # S02: Internal design representation
 
-Status: proposed specification only. No model, serializer, resize algorithm, or
-renderer is implemented or changed by this document.
+Status: the S02 foundation is implemented in
+[engine/internal_schema.py](../engine/internal_schema.py). Parsing, immutable
+models, derived views, and serialization are available. Controlled editing and
+stage-one layout validation remain proposed APIs. Resize and rendering behavior
+are unchanged.
+
+## Implemented milestone and shared interfaces
+
+Both future consumers should import the same models from
+`engine.internal_schema`; no second JSON parser is needed for graph features.
+
+| Public interface | Available behavior |
+| --- | --- |
+| `ABSENT`, `Absent` | Stable missing-value sentinel; compare with `is ABSENT`. |
+| `SchemaError(ValueError)` | Parsing/construction failure with a `.path` and explanatory message. |
+| `Canvas.from_adobe(data)`, `canvas.to_adobe()` | Validated integral pixel dimensions; `aspect_ratio`, `area`, and `orientation`. |
+| `StyleRun.from_adobe(data)`, `run.to_adobe()` | Preserved indices, optional overrides, and extensions. |
+| `Element.from_adobe(data)`, `element.to_adobe()` | All 28 Adobe fields, internal `required=True`, `effective_value(name)`, and derived geometry. |
+| `Design.from_adobe(source, target_canvas=...)`, `design.to_adobe()` | Immutable original order, distinct canvas context, and lossless current-layout output. |
+| `design.elements`, `elements_by_id`, `get_element(id)`, `groups` | Direct immutable iteration, indexed lookup, and explicit group membership. |
+| `design.theme`, `Theme.from_elements(elements)` | Ordered, deduplicated observations of fonts, colors, and asset references. |
+
+The core module has only standard-library dependencies. It reads the bundled
+`chameleon_design_schema_v0.9.json` relative to its module location, so it does
+not depend on the process working directory. Keep that file alongside the
+`engine/` package when distributing the module; the existing Dockerfile already
+copies both. Field constraints, conditional requirements, and effective defaults
+come from this schema, while explicit dataclass annotations provide direct typed
+access. The validator handles the constructs in v0.9; it is not a general-purpose
+JSON Schema implementation.
+
+All model dataclasses are frozen, keyword-only, and slotted. Element/run
+`extras` expose recursively read-only mappings and tuples; `to_adobe()` converts
+these back into fresh dictionaries and lists. Original integer/float types and
+array order survive the conversion. Lists passed to direct model constructors
+for elements or runs are detached into tuples. Direct constructors validate
+state too; their `extras` may also reuse an existing frozen view.
+
+The teammate can rely on the table above for source inspection and serialization.
+Direct `Design` construction accepts explicit current/source/target canvases
+and typed elements, but does not certify a layout against an original design.
+`dataclasses.replace` likewise does not enforce cross-design retention policy.
+The proposed `with_updates()`, `with_layout()`, and `validate_stage_one()` are
+deliberately **not implemented** in this milestone. No placeholder candidate,
+graph, ranker, solver, or rendering components are added.
+
+Install test-only dependencies with `python -m pip install -r requirements-dev.txt`
+and run `python -m pytest -q` from the repository root. The tests include all
+three sample task envelopes, checking their `source` values with and without
+target context, plus validation, immutability, and extension cases.
+
+### Integration differences to resolve in later milestones
+
+The implementation request's illustrative orchestration differs from
+[S03–S06 §1](S03-S06_layout_engine_technical_spec.md#1-modules-and-stable-boundaries):
+that spec declares `generate_candidates(source, target, config)` returning
+`list[LayoutCandidate]`, and its `ValidationReport` exposes `schema_ok`,
+`policy_ok`, and `geometry_ok` rather than `.is_valid`. Its §6 prose also calls
+the outputs `Design` instances, whereas §1 wraps them in `LayoutCandidate`.
+These are future generator/validator interface questions; S02 leaves them open
+and adds no alternative candidate model. The underlying `Design` model and
+`Design.from_adobe(source, target_canvas=...)` agree across these proposals.
+
+The advanced fixture's suggestion to skip a missing asset conflicts with the
+schema's same-ID contract; S02 preserves the element and reference. The core
+fixture's out-of-range run and negative coordinates are schema-permitted input
+and are preserved, as detailed below. No source-target feasibility or image
+proportion checks are applied during parsing.
 
 ## Contract and scope
 
@@ -40,7 +106,7 @@ introduced into Adobe JSON.
 ## Representation and presence
 
 Use Python 3.10 standard-library tools: `dataclasses`, `enum`, `typing`, `copy`,
-`json`, and, if needed, `types.MappingProxyType`. Proposed models are frozen,
+`json`, and `types.MappingProxyType`. Models are frozen,
 keyword-only dataclasses. Use tuples for element and style-run sequences, and
 explicit copy/replacement methods for edits. This keeps IDs, indexes, grouping,
 and source snapshots consistent without tracking arbitrary list mutations.
@@ -57,7 +123,8 @@ The notation below uses:
   A one-member `Enum` is a suitable Python 3.10 implementation because identity
   survives copying. It is not a JSON value.
 - `extras`: privately owned extension data, exposed only through defensive
-  copies or a recursively protected view. It defaults to an empty mapping.
+  copies or a recursively protected view. The implementation uses protected
+  mappings and tuples (`FrozenJSONValue`); it defaults to an empty mapping.
 
 All optional Adobe fields default internally to `ABSENT`, including fields with
 schema defaults. Do not use `None` or a default value to mean missing:
@@ -290,11 +357,11 @@ layouts. Store source elements only once in that source instance; the candidate
 need not duplicate a full original JSON snapshot. Replacing elements constructs
 a new design, keeping source/target context and rebuilding derived lookups.
 
-## Proposed Python APIs
+## Python APIs and deferred editing proposal
 
-A future `engine/internal_schema.py` module could contain these models. The
-signatures below describe the intended interface, not an implementation plan
-that changes the current entry point. `Mapping`, `Iterable`, `Literal`, and
+The signatures below describe the complete S02 interface proposal. All except
+the three editing/validation methods marked deferred are now implemented in
+`engine/internal_schema.py`. `Mapping`, `Iterable`, `Literal`, and
 `Any` are available in Python 3.10; postponed annotations can handle forward
 references. `JSONValue` is the recursive type described above.
 
@@ -313,6 +380,7 @@ def effective_value(
     self, field_name: str,
 ) -> Number | str | None | tuple[StyleRun, ...] | Absent: ...
 def normalized_bounds(self, canvas: Canvas) -> tuple[float, float, float, float]: ...
+# Deferred: not available in the foundation milestone.
 def with_updates(self, **changes: Any) -> Element: ...
 
 # Theme
@@ -329,6 +397,7 @@ def from_adobe(
 ) -> Design: ...
 def to_adobe(self) -> dict[str, JSONValue]: ...
 def get_element(self, element_id: str) -> Element: ...
+# Deferred: not available in the foundation milestone.
 def with_layout(self, *, canvas: Canvas, elements: Iterable[Element]) -> Design: ...
 def validate_stage_one(self, *, source: Design) -> None: ...
 ```
@@ -350,7 +419,8 @@ against the original source as well, including fixed content, font families,
 and asset references. Keep this policy check separate from lossless parsing and
 serialization; source fixtures need not satisfy target-layout constraints.
 
-Illustrative future use, with no proposed change to `resize.py` in S02:
+Illustrative future use (the candidate portion requires deferred APIs), with
+no change to `resize.py` in this milestone:
 
 ```python
 source_design = Design.from_adobe(source, target_canvas=target_canvas)
@@ -429,7 +499,7 @@ missing asset does not authorize dropping the element from output: the
 same-ID contract in the schema, rules, and resize boundary takes precedence.
 Asset availability and renderer placeholders are outside this data model.
 
-When implementation is authorized, verify these behaviors:
+Foundation acceptance criteria (controlled editing checks remain deferred):
 
 1. Round-trip each sample's `source` with and without target context; assert
    recursive equality, key presence, decoded numeric types, element/run order,
@@ -451,5 +521,7 @@ When implementation is authorized, verify these behaviors:
 7. Check stable theme deduplication, run colors, null-stroke exclusion, and the
    retained missing asset reference, without inferred semantic roles.
 
-These are acceptance criteria for later implementation, not tests or runtime
-changes introduced by this specification.
+The implemented foundation has tests in
+[tests/test_internal_schema.py](../tests/test_internal_schema.py). Checks for
+controlled edits, optional removal, `with_layout`, and full stage-one layout
+validation remain requirements for a later implementation.

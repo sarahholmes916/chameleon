@@ -1,0 +1,2 @@
+# S02 tests; the shared representation itself uses only the standard library.
+pytest>=7
