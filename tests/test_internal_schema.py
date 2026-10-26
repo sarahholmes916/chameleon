@@ -4,6 +4,7 @@ import ast
 from copy import copy, deepcopy
 from dataclasses import FrozenInstanceError, fields, replace
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -299,6 +300,74 @@ def test_theme_is_an_ordered_inventory_without_defaults_or_inference():
     assert Element.from_adobe(image_element()).fit is ABSENT
     with pytest.raises(FrozenInstanceError):
         theme.fonts = ()
+
+
+def test_theme_includes_a_color_present_only_in_a_stroke():
+    source = source_with({
+        "id": "outlined-shape", "type": "shape", "x": 0, "y": 0,
+        "width": 30, "height": 40, "shape_type": "rectangle",
+        "fill_color": "rgba(10,20,30,1)",
+        "stroke_color": "rgba(70,80,90,1)", "stroke_width": 2,
+    })
+    design = Design.from_adobe(source)
+
+    # The stroke must contribute independently of fill/text/run colors.
+    assert design.theme.colors == ("rgba(10,20,30,1)", "rgba(70,80,90,1)")
+    assert_same_json(design.to_adobe(), source)
+
+
+def test_theme_fonts_deduplicate_in_first_occurrence_order():
+    families = ("Zulu Sans", "Alpha Serif", "Zulu Sans", "Middle Mono", "Alpha Serif")
+    source = source_with(*(
+        text_element(id=f"text-{index}", font_family=family)
+        for index, family in enumerate(families)
+    ))
+    design = Design.from_adobe(source)
+
+    # Deliberately nonalphabetical, with repeated values separated by others.
+    assert design.theme.fonts == ("Zulu Sans", "Alpha Serif", "Middle Mono")
+    assert_same_json(design.to_adobe(), source)
+
+
+def test_theme_assets_deduplicate_in_first_occurrence_order():
+    assets = ("z-last.png", "a-first.png", "z-last.png", "m-middle.png", "a-first.png")
+    source = source_with(*(
+        image_element(id=f"image-{index}", asset_id=asset)
+        for index, asset in enumerate(assets)
+    ))
+    design = Design.from_adobe(source)
+
+    assert design.theme.asset_references == ("z-last.png", "a-first.png", "m-middle.png")
+    assert_same_json(design.to_adobe(), source)
+
+
+@pytest.mark.parametrize("field_name,value", [
+    pytest.param("font_size", 1, id="font-size-minimum-int"),
+    pytest.param("font_size", 1.0, id="font-size-minimum-float"),
+    pytest.param("opacity", 0, id="opacity-minimum-int"),
+    pytest.param("opacity", 0.0, id="opacity-minimum-float"),
+    pytest.param("opacity", 1, id="opacity-maximum-int"),
+    pytest.param("opacity", 1.0, id="opacity-maximum-float"),
+])
+def test_inclusive_numeric_boundaries_preserve_explicit_values(field_name, value):
+    data = text_element(**{field_name: value})
+    source = source_with(data)
+    design = Design.from_adobe(source)
+
+    assert_same_json(design.to_adobe(), source)
+    assert_same_json(design.elements[0].effective_value(field_name), value)
+    assert_same_json(Element(**data).to_adobe(), data)
+
+
+@pytest.mark.parametrize("field_name,value", [
+    pytest.param("font_size", math.nextafter(1.0, 0.0), id="just-below-font-size-minimum"),
+    pytest.param("opacity", math.nextafter(0.0, -math.inf), id="just-below-opacity-minimum"),
+    pytest.param("opacity", math.nextafter(1.0, math.inf), id="just-above-opacity-maximum"),
+])
+def test_numeric_values_just_outside_boundaries_are_rejected(field_name, value):
+    with pytest.raises(SchemaError) as error:
+        Design.from_adobe(source_with(text_element(**{field_name: value})))
+    assert error.value.path == f"elements[0].{field_name}"
 
 
 @pytest.mark.parametrize("dimension", [0, -1, 1.5, True, False, None, "10", float("inf"), float("-inf"), float("nan")])
