@@ -2,7 +2,10 @@
 
 **Version:** 0.1 proposed implementation baseline  
 **Date:** 2026-10-26  
-**Status:** Design proposal; NOT a statement that these modules are implemented  
+**Status:** S03 graph construction/feature extraction and the untrained GATv2
+ranker/checkpoint/scoring foundation are implemented. Generation, preference
+training/evaluation, and integration remain proposals.
+See [M2A interfaces and verification](graph_features.md) and [ranker interfaces](ranker.md).
 **Dependencies:** S02 *Internal design representation*; Adobe v0.9 JSON schema; challenge RULES.md/FAQ.md; `engine/resize.py`  
 **Primary objective:** Given a structured Adobe source design and target canvas, produce a legally structured, constraint-checked resized design and, internally, several materially different alternatives. Learn candidate preferences from human side-by-side comparisons rather than treating heuristic scores as ground-truth labels.
 
@@ -115,6 +118,11 @@ Edges are **not deleted** because source elements appear far apart or have diffe
 ### 3.2 Larger graphs (`N>64`)
 
 If tests ever contain more than 64 elements, make a sparse graph by: (a) connecting each node bidirectionally to its `k=8` nearest centers in normalized source coordinates; (b) adding all bidirectional edges between elements sharing an explicit group, capped at 16 nearest same-group neighbors per node; (c) computing weakly connected components and repeatedly adding bidirectional edges between the closest pair of nodes belonging to different components until connected. Deduplicate and sort edges lexicographically. The same source-derived topology is used for every candidate of that source. Record `graph_topology="dense_v1"` or `"sparse_v1"` in model metadata. Do not mix topologies within a model evaluation without including both in its training distribution.
+
+M2A makes distance ties deterministic by source index. Same-group selection is
+capped at 16 neighbors per node before adding reverse edges; resulting degrees
+may be higher. Closest-component bridge ties use `(i, j)` with `i < j`. These
+conventions refine section 3.2 without changing the feature dimensions or order.
 
 ### 3.3 Exact 31-dimensional edge feature contract
 
@@ -241,6 +249,15 @@ mask [N,1] ------------------┘
 ```
 
 Set `add_self_loops=True`, `fill_value=0.0` for the internally generated self-loop edge attributes. Use an explicit residual/skip connection at each GNN stage if tensor shapes allow (`h_out = norm(conv(h,...) + projected_h)`), with its exact implementation versioned. For the initial three layers the input width differs only on the first layer, so use a `Linear(86,128)` skip projection there. The implementation **must specify the chosen PyG version** in lockfile and verify that these exact options are supported.
+
+Implemented as `gatv2_ranker_v1` in `engine/ranker.py`, using PyG `2.8.1`
+pinned in `requirements-graph.txt`. The first skip is linear and the other two
+are identity; normalization is per-node LayerNorm. Text projection uses ReLU
+and is multiplied by the presence mask, so missing vectors remain zero after
+projection bias. Attention dropout is 0.0; feature/head dropout defaults to 0.10.
+The [ranker handoff](ranker.md) specifies checkpoint version/encoder/topology
+checks and explicit inference failures. This is untrained model infrastructure,
+not evidence of useful preference ranking or an integrated fallback.
 
 The score is meaningful for **ranking candidates under the same source and target**, not as a universal design-quality percentage or calibrated probability. A score of 0.9 does not mean "90% good." For human explainability do not claim attention is an importance explanation.
 

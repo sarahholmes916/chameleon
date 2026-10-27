@@ -1,6 +1,6 @@
-# Adobe Chameleon — Claude Code Project Instructions
+# Adobe Chameleon — Repository Agent Instructions
 
-This file belongs at the **repository root** as `CLAUDE.md`. It guides work on the Adobe Chameleon JSON-based design-resizing engine. Keep it short enough to remain useful in every session; detailed formulas and model parameters belong in the technical specifications, not here.
+This file belongs at the **repository root** as `AGENTS.md`. It guides Codex, Claude Code, and other coding agents working on the Adobe Chameleon JSON-based design-resizing engine. Keep it short enough to remain useful in every session; detailed formulas and model parameters belong in the technical specifications, not here.
 
 ## 1. Mission and current maturity
 
@@ -17,7 +17,8 @@ For any relevant change, locate and read the applicable files. Do not assume pat
 2. **Current repository behavior:** `engine/resize.py`, real code, tests, input fixtures, and the installed runtime. Verify actual behavior; code may itself violate the competition contract.
 3. **S02 — Internal design representation:** authoritative *design proposal* for parsing, immutability, absence semantics, derived geometry, and round-tripping. Locate its actual path under `docs/` or elsewhere.
 4. **S03–S06 — Layout Engine Technical Specification v0.1:** design proposal for graph features, model, solver, labeling, and integration. Locate `S03-S06_layout_engine_technical_spec.md` or `Adobe_Chameleon_S03-S06_Technical_Spec_v0.1.md` if present.
-5. This file governs agent workflow; it does **not** override official rules, the schema, or a reviewed architecture decision.
+5. **Implementation plan:** Locate and read `docs/IMPLEMENTATION_PLAN.md` for developer ownership, current milestone, dependencies, and shared interfaces before changing component boundaries. Confirm that documented progress matches the actual code.
+6. This file governs agent workflow; it does **not** override official rules, the schema, or a reviewed architecture decision.
 
 When sources disagree, **name the conflict with file and line references** before changing behavior. Do not silently reconcile an uncertainty by inventing a constraint.
 
@@ -95,7 +96,19 @@ Do **not** create all proposed files merely to match this table. Implement only 
 - State what was **implemented**, what was **tested (commands and observed results)**, what remains **unverified**, and what changed. File and line evidence is preferable to confident unsupported claims.
 - Never claim test success, GPU training, generated data quality, contest compliance, or visual superiority unless actually checked. A model's numerical ranking is not proof of aesthetic improvement.
 
-## 8. Current implementation sequence
+## 8. Mandatory feature tests and CI coverage
+
+**Every new feature, behavioral change, or bug fix must include automated regression coverage in the same PR.** Do not treat a feature as complete solely because it works locally or because unrelated existing tests pass.
+
+1. **Add or update tests with the code.** Test the intended behavior, relevant edge cases, and failure paths at the appropriate level (unit, integration, or contract). For bug fixes, add a test that would fail before the fix. For Adobe output changes, test schema/element-retention invariants; for graph/model changes, test feature contracts, batching, and deterministic CPU behavior as applicable.
+2. **Make sure CI actually runs those tests.** Inspect `.github/workflows/ci.yml` and the test configuration. If the existing workflow does not collect the new tests, update it **in the same PR**; do not create one workflow per feature. Keep a fast core job independent of PyTorch, and a separate CPU-only ML job for graph/ranker tests. Add additional jobs only when justified by distinct dependencies or runtimes.
+3. **Fail visibly, not silently.** Required suites must not be skipped because dependencies are missing, test paths are wrong, or collection is empty. In the dedicated ML job, verify graph/model suites execute rather than being silently skipped by optional-dependency guards. Do not use `continue-on-error` or equivalent to hide required failures.
+4. **Keep PR CI cheap and reproducible.** Use deterministic fixtures and seeds, no GPU, no network downloads of pretrained weights at test time, no human annotation, and no full model training for ordinary PR checks. Run expensive training and perceptual evaluations separately; test their software contracts in CI.
+5. **Verify and report evidence.** Run targeted tests locally, plus applicable broader checks. After pushing, inspect the GitHub Actions result before calling CI green; local tests or valid workflow YAML are not proof that GitHub Actions passed. In the PR summary, list the new/updated tests, their CI job, local results, and any GitHub checks still pending.
+
+If a behavior cannot be meaningfully automated (for example, subjective visual quality), add automated checks for the objective invariants and document the manual review procedure and its result. Do not silently waive test coverage. If CI is currently misconfigured or lacks the relevant job, fix that before considering the new feature merge-ready.
+
+## 9. Current implementation sequence
 
 1. **M1:** Lossless S02 parser/serializer and tests; preserve existing resize entry point.
 2. **M2:** Computational candidate generator, hard validator, and renderer/preview with verified fidelity; heuristic scorer works without ML.
@@ -105,7 +118,7 @@ Do **not** create all proposed files merely to match this table. Implement only 
 
 Work can proceed in parallel where interfaces are agreed. Do not block correctness and baseline work on a trained model. Keep experiments separate from the competition-facing path until verified.
 
-## 9. Communication / deliverable format
+## 10. Communication / deliverable format
 
 For nontrivial tasks, finish with: **Changed** (exact files/interfaces), **Evidence** (tests/run output), **Risks or open questions** (especially rule ambiguities), and **Next action**. Distinguish observed facts from proposed behavior. Do not produce fabricated diagrams, code references, benchmarks, or CI checks. A check that was not run is **not run**, not “passed.”
 

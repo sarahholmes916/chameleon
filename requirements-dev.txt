@@ -1,2 +1,3 @@
-# S02 tests; the shared representation itself uses only the standard library.
+# Core tests and linting; the shared representation uses only the standard library.
 pytest>=7
+ruff>=0.11,<1

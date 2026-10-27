@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+
+jobs:
+  core:
+    name: Core / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install core test tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+
+      - name: Lint core and CI helpers
+        run: >-
+          python -m ruff check --no-cache
+          engine/internal_schema.py engine/resize.py
+          tests/test_internal_schema.py tests/test_ci.py scripts
+
+      - name: Run required core suites without ML dependencies
+        run: python -m scripts.ci_tests core
+
+  graph-ml:
+    name: Graph and ML / CPU
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CUDA_VISIBLE_DEVICES: ''
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install CPU PyTorch and project graph dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements-dev.txt -r requirements-graph.txt
+          python -m pip check
+
+      - name: Lint graph and ranker code
+        run: >-
+          python -m ruff check --no-cache
+          engine/graph_features.py engine/text_embeddings.py engine/ranker.py
+          tests/test_graph_features.py tests/test_ranker.py
+
+      - name: Verify CPU imports and execute required ML suites
+        run: python -m scripts.ci_tests ml

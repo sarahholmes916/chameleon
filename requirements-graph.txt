@@ -1,0 +1,4 @@
+# Optional S03 environment; do not include in the baseline resize dependencies.
+# Install an appropriate CPU/CUDA PyTorch wheel first if one is already selected.
+torch>=2.6,<3
+torch-geometric==2.8.1

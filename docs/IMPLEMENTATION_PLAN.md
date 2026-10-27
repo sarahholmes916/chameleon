@@ -1,6 +1,7 @@
 # Adobe Chameleon — Implementation Plan & Responsibilities
 
-**Status:** Working plan (not an implementation status report)  
+**Status:** Working plan; checked items reflect verified implementation
+
 **Version:** 0.1  
 **Updated:** 2026-10-26  
 **Location:** `docs/IMPLEMENTATION_PLAN.md`
@@ -171,9 +172,9 @@ result = selected.design.to_adobe()
 
 ## 6. Milestones and acceptance criteria
 
-Check boxes only after actual implementation and tests; no item below is being claimed complete.
+Check boxes only after actual implementation and tests; unchecked items remain planned.
 
-### M1 — Shared S02 foundation (Developer 1; **current task**)
+### M1 — Shared S02 foundation (Developer 1)
 
 - [ ] Locate and verify original schema, rules, samples, and existing source files.
 - [ ] Implement core typed representation and `ABSENT` handling in `engine/internal_schema.py`.
@@ -186,11 +187,19 @@ Check boxes only after actual implementation and tests; no item below is being c
 
 ### M2A — Graph foundation (Developer 1; after minimal S02)
 
-- [ ] Implement node feature and relational edge calculations from S03 (including missing-value masks).
-- [ ] Verify all-pairs directed edges for designs with up to 64 elements; one graph per design/candidate/target, not separate group graphs.
-- [ ] Match source and candidate nodes by stable ID, not order guesses or ID semantics.
-- [ ] Implement optional frozen text embeddings and graph-batch tests.
-- [ ] Test tensor sizes, finite values, determinism, and a GNN forward/backward pass with *test fixtures*.
+- [x] Implement node feature and relational edge calculations from S03 (including missing-value masks).
+- [x] Verify all-pairs directed edges for designs with up to 64 elements; one graph per design/candidate/target, not separate group graphs.
+- [x] Match source and candidate nodes by stable ID, not order guesses or ID semantics.
+- [x] Implement optional frozen text embeddings and graph-batch tests.
+- [x] Test tensor sizes, finite values, determinism, and a GNN forward/backward pass with *test fixtures*.
+
+Implemented in `engine/graph_features.py` and `engine/text_embeddings.py`;
+see [the graph foundation handoff](graph_features.md) for the exact API,
+dependencies, topology conventions, and test commands. The optional encoder
+interface and frozen adapter are tested with deterministic test providers;
+real pretrained weights were not downloaded or evaluated. The GATv2 exercise
+in the graph test module is a small CPU compatibility test. The subsequently
+implemented full ranker foundation is documented under M4 below.
 
 **Exit:** graph tensors satisfy the versioned feature contract; the model code can run without real preference labels.
 
@@ -217,12 +226,21 @@ Check boxes only after actual implementation and tests; no item below is being c
 
 ### M4 — Ranker, evaluation, and integration (both)
 
+- [x] Implement the S03 GATv2 architecture and test forward/backprop on CPU and CUDA.
+- [x] Implement versioned checkpoints and batched scoring with explicit model/encoder failure behavior.
 - [ ] Train simple learned ranking baseline before/alongside GNN; record held-out pairwise metrics.
 - [ ] Train GNN with human preference comparisons; do not infer element-importance ground truth from attention.
 - [ ] Compare GNN ranking to deterministic ranking using the *same valid candidate sets*.
 - [ ] Connect optional learned scores to selection; preserve deterministic fallback if checkpoint is absent/incompatible.
 - [ ] Test validity, element preservation, extreme canvases, runtime, and end-to-end human preferences.
 - [ ] Keep diverse top-K internal/demo alternatives while official `resize(...)` returns only one design.
+
+The architecture/scoring foundation is implemented in `engine/ranker.py` with
+tests in `tests/test_ranker.py`; see [the ranker handoff](ranker.md). Test fixtures
+verify mechanics and checkpoint provenance validation only. There is no human
+preference training run, evaluated checkpoint, or production fallback integration.
+These foundation tasks can precede M3; the remaining training/evaluation tasks
+still require validated candidates, faithful previews, and human judgments.
 
 **Exit:** reproducible end-to-end resize, actual comparison data, explicit failure/fallback tests, no unsupported visual-quality claims.
 
