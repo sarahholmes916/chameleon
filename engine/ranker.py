@@ -30,13 +30,13 @@ from engine.internal_schema import Canvas, Design
 from engine.text_embeddings import TEXT_DIMENSION, TextEmbeddingCache
 
 
-RANKER_VERSION = "gatv2_ranker_v1"
+RANKER_VERSION = "gatv2_ranker_v3"
 CHECKPOINT_VERSION = "ranker_checkpoint_v1"
 
 
 def _architecture() -> dict[str, Any]:
     return dict(
-        version=RANKER_VERSION, numeric_dim=53, edge_dim=31, text_dim=384,
+        version=RANKER_VERSION, numeric_dim=NODE_DIMENSION, edge_dim=EDGE_DIMENSION, text_dim=TEXT_DIMENSION,
         text_projection_dim=32, hidden_dim=128, heads=4, layers=3,
         pooling=["mean", "max"], mlp_hidden_dim=128,
         residual="linear_first_identity_rest", normalization="node_layer_norm",
@@ -96,9 +96,9 @@ class LayoutRanker(nn.Module):
             GATv2Conv(width, 32, heads=4, concat=True, edge_dim=EDGE_DIMENSION,
                       dropout=0.0, add_self_loops=True, fill_value=0.0,
                       residual=False, share_weights=False)
-            for width in (86, 128, 128)
+            for width in (NODE_DIMENSION + 32 + 1, 128, 128)
         ])
-        self.skips = nn.ModuleList([nn.Linear(86, 128), nn.Identity(), nn.Identity()])
+        self.skips = nn.ModuleList([nn.Linear(NODE_DIMENSION + 32 + 1, 128), nn.Identity(), nn.Identity()])
         self.norms = nn.ModuleList([nn.LayerNorm(128) for _ in range(3)])
         self.feature_dropout = nn.Dropout(self.config.dropout)
         self.head = nn.Sequential(

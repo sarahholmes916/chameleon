@@ -151,3 +151,18 @@ core suite with **172 passed** (including 41 output validation/repair tests) and
 the strict CPU ML suite with **165 passed, one allowed CUDA skip**. Core Ruff
 and `git diff --check` also passed. These are local results; a new hosted CI run
 is still required.
+
+The graph_v2 typography revision is covered by the existing required graph and
+ranker modules in the CPU ML job; no new job or skip exception is needed. Local
+Python 3.11.17 verification: **175 ML tests passed** (87 graph, 88 ranker), with
+one allowed CUDA skip; **172 core tests passed**. New regressions cover font-only
+candidate differences, ID-based matching, extreme sizes, model input gradients,
+and incompatible old tensors/checkpoints. ML Ruff and diff checks passed.
+This does not establish a hosted CI result or trained ranking quality.
+
+The graph_v3 color revision also runs in those existing required modules. Local
+verification: **231 ML tests passed** (138 graph, 93 ranker), with one allowed
+CUDA skip; **172 core tests passed**. The added cases load colors from all three
+Adobe JSON fixtures and cover RGB/alpha/masks, unsupported colors, source
+preservation, and graph_v2 checkpoint rejection. Ruff and diff checks passed;
+README.md was unchanged. Hosted CI has not been run for this revision.

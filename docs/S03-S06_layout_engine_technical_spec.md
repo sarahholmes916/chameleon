@@ -1,7 +1,7 @@
 # Adobe Chameleon — Technical Specification S03–S06
 
-**Version:** 0.1 proposed implementation baseline  
-**Date:** 2026-10-26  
+**Version:** 0.1 baseline with graph_v3 typography and color revisions
+**Updated:** 2026-10-27
 **Status:** S03 graph construction/feature extraction and the untrained GATv2
 ranker/checkpoint/scoring foundation are implemented. A deterministic output
 validation gate, bounded repair search, and resize integration are also implemented
@@ -15,7 +15,7 @@ See [M2A interfaces and verification](graph_features.md) and [ranker interfaces]
 
 ---
 
-## 0. Decisions frozen for v0.1
+## 0. Baseline decisions with graph_v3 feature revisions
 
 1. **One graph per `(source design, candidate layout, target canvas)`**, with exactly one node per original Adobe element. No output nodes for clusters, canvases, or brands. A source design with 17 elements yields 17 nodes, even if it contains several explicit groups.
 2. **Dense directed element graph for `1 <= N <= 64`:** for every `i != j`, include edge `i -> j`. Thus `E=N(N-1)`; 17 elements yield 272 directed edges. PyG layers add their own self-loop messages. For `N>64`, use the deterministic sparse procedure in §3.2.
@@ -50,7 +50,7 @@ training/
   train_ranker.py          # S05; training, evaluation, checkpoints
   evaluate.py              # S05/S06; ablation and end-to-end evaluation
 configs/
-  graph_v1.yaml
+  graph_v3.yaml
   generator_v1.yaml
   ranker_v1.yaml
 ```
@@ -178,9 +178,9 @@ If explicit relation prediction becomes necessary in v0.2, add a supervised edge
 
 ## 4. Exact node feature contract
 
-For the ranker, each element is one node containing **53 numeric fields**, a **384-dimensional frozen text vector** as a separate input, and a one-dimensional presence mask. The model projects the 384-dimensional vector to 32 and concatenates it, yielding **86 features per node** at the first GNN layer: `53 + 32 + 1 = 86`.
+For the ranker, each element is one node containing **57 numeric fields**, a **384-dimensional frozen text vector** as a separate input, and a one-dimensional presence mask. The model projects the 384-dimensional vector to 32 and concatenates it, yielding **90 features per node** at the first GNN layer: `57 + 32 + 1 = 90`.
 
-### 4.1 The 53 numeric fields, in exact order
+### 4.1 The 57 numeric fields, in exact order
 
 | Index range | Dim | Feature / definition |
 |---|---:|---|
@@ -206,8 +206,26 @@ For the ranker, each element is one node containing **53 numeric fields**, a **3
 | 46:48 | 2 | Candidate center minus source center, both in normalized canvas coordinates |
 | 48:50 | 2 | `clip(log((w_c+1)/(w_s+1)),-4,4)/4`, corresponding height scale |
 | 50:53 | 3 | Global `clip(log(TW/TH),-4,4)/4`, `clip(log(TW/SW),-4,4)/4`, `clip(log(TH/SH),-4,4)/4` |
+| 53:54 | 1 | Candidate text `log1p(font_size_c)/log1p(max(TW,TH))`; zero on other types |
+| 54:55 | 1 | Text font-size change `clip(log(font_size_c/font_size_s),-4,4)/4`; zero on other types |
+| 55:56 | 1 | Source shape fill alpha in [0,1]; zero for unsupported colors or other types |
+| 56:57 | 1 | Source text color alpha in [0,1]; zero for unsupported colors or other types |
 
-Here `W,H` refer to the source canvas; `TW,TH` refer to the target; `SW,SH` are aliases of source width/height in the final three entries. Char count means `len(content)` in Python Unicode code points; word count means `len(content.split())`. There is no need to normalize or rewrite stored content. Clip all source normalized geometric numeric inputs in indices 3:10 and candidate geometry in 42:48 to `[-4,4]` **for features only**, except dimension/area terms which are lower-bounded at zero. Unknown non-hex color literals must not be altered; only the features get `parse_mask=0`. Parse `#RGB`, `#RRGGBB`, and `#RRGGBBAA` by expanding to RGB in `[0,1]` (the final AA portion is intentionally not encoded in this v0.1 RGB feature). The Adobe literals remain exact.
+**graph_v2 migration:** append these two typography features; original columns
+0:53 retain their meanings and order. Candidate font size is joined by exact
+element ID, not candidate array position. The candidate size uses target-canvas
+normalization; source font size at column 16 keeps source-canvas normalization.
+The ratio is evaluated as a difference of logs to avoid overflow. Font sizes
+are schema-valid numbers >=1; no availability mask is needed beyond type.
+The normalized candidate log size is not clipped, so large sizes remain
+distinguishable; the change feature saturates at +/-1. These are features,
+not edits or rendered-text fit guarantees. Text vectors and the 31 edge features
+are unchanged. The shared feature version (including checkpoint edge metadata)
+advanced to graph_v2 for typography. The current graph_v3 adds the two alpha
+columns and rgba parsing. Both graph_v1 and graph_v2 tensors/checkpoints are
+rejected, not padded. The architecture is now gatv2_ranker_v3 with 90 inputs.
+
+Here `W,H` refer to the source canvas; `TW,TH` refer to the target; `SW,SH` are aliases of source width/height in columns 50:53. Char count means `len(content)` in Python Unicode code points; word count means `len(content.split())`. There is no need to normalize or rewrite stored content. Clip all source normalized geometric numeric inputs in indices 3:10 and candidate geometry in 42:48 to `[-4,4]` **for features only**, except dimension/area terms which are lower-bounded at zero. Color parsing supports numeric comma-separated rgb()/rgba() and #RGB/#RGBA/#RRGGBB/#RRGGBBAA. Channels must be finite and in [0,255], alpha in [0,1]. RGB is normalized by 255, not premultiplied; alpha is separate from element opacity. Missing alpha defaults to 1 for supported colors. Transparent colors have mask 1 and alpha 0. Unknown, malformed, out-of-range, percentage, named, or space/slash literals get zero color features and mask 0. Whitespace, case-insensitive function names, and decimal/exponent numbers are supported. Original JSON literals stay exact. These source color features do not authorize candidate recoloring. Stroke and per-run colors remain unpooled; see graph_features.md for the full parser boundary.
 
 ### 4.2 Text vector and availability
 
@@ -222,7 +240,7 @@ Here `W,H` refer to the source canvas; `TW,TH` refer to the target; `SW,SH` are 
 
 ```python
 Data(
-    x_numeric = FloatTensor[N, 53],
+    x_numeric = FloatTensor[N, 57],
     text_vec  = FloatTensor[N, 384],
     text_mask = FloatTensor[N, 1],
     edge_index= LongTensor[2, E],
@@ -233,13 +251,13 @@ Data(
 
 `float32` for feature tensors; `int64` for `edge_index`; finite values only. Every candidate of the same source has the same element index mapping and graph topology. The graph builder must not modify either `Design`. For dense N=4, assert 12 directed edges. For N=17, assert 272. Text encoder caching must not change the representation of repeated strings.
 
-## 5. Scoring network: concrete v0.1 model
+## 5. Scoring network: gatv2_ranker_v3
 
 ```text
-numeric fields: [N,53] -----┐
-text [N,384] -> Linear 32 ---+--> concat [N,86]
+numeric fields: [N,57] -----┐
+text [N,384] -> Linear 32 ---+--> concat [N,90]
 mask [N,1] ------------------┘
-       GATv2Conv(86 -> 128, 4 heads x 32, edge_dim=31)
+       GATv2Conv(90 -> 128, 4 heads x 32, edge_dim=31)
        LayerNorm(128) + ELU + dropout(0.10)
        GATv2Conv(128 -> 128, 4 heads x 32, edge_dim=31)
        LayerNorm(128) + ELU + dropout(0.10)
@@ -250,9 +268,9 @@ mask [N,1] ------------------┘
        -> one uncalibrated scalar S(source,candidate,target)
 ```
 
-Set `add_self_loops=True`, `fill_value=0.0` for the internally generated self-loop edge attributes. Use an explicit residual/skip connection at each GNN stage if tensor shapes allow (`h_out = norm(conv(h,...) + projected_h)`), with its exact implementation versioned. For the initial three layers the input width differs only on the first layer, so use a `Linear(86,128)` skip projection there. The implementation **must specify the chosen PyG version** in lockfile and verify that these exact options are supported.
+Set `add_self_loops=True`, `fill_value=0.0` for the internally generated self-loop edge attributes. Use an explicit residual/skip connection at each GNN stage if tensor shapes allow (`h_out = norm(conv(h,...) + projected_h)`), with its exact implementation versioned. For the initial three layers the input width differs only on the first layer, so use a `Linear(90,128)` skip projection there. The implementation **must specify the chosen PyG version** in lockfile and verify that these exact options are supported.
 
-Implemented as `gatv2_ranker_v1` in `engine/ranker.py`, using PyG `2.8.1`
+Implemented as `gatv2_ranker_v3` in `engine/ranker.py`, using PyG `2.8.1`
 pinned in `requirements-graph.txt`. The first skip is linear and the other two
 are identity; normalization is per-node LayerNorm. Text projection uses ReLU
 and is multiplied by the presence mask, so missing vectors remain zero after
@@ -311,12 +329,37 @@ Do not encode reading order as Adobe element-array order. The source-position so
 
 ### 6.3 Decision variables and geometric refinement
 
-Each element has candidate variables `(x_i,y_i,w_i,h_i)`. Rotation, image fit, opacity, and text styling are fixed by default unless explicitly authorized by rules. Candidate dimension minimums are not invented as hard contest rules: a preferred minimum font size or touch target is a **soft quality preference** only when those fields can legally change. Preserve zero-area lines and allowed zero-area elements under the S02 schema; don't impose invalid positive-area requirements.
+Each element has candidate variables `(x_i,y_i,w_i,h_i)`. Text elements also
+have candidate `font_size_i >= 1` in pixels: font-size adaptation is explicitly
+permitted by RULES.md and the Adobe schema. Search may shrink or enlarge font
+size together with box geometry; changing a box alone is not typography fitting.
+Preserve font family, literal content, font weight/style, alignment, line height,
+letter spacing, max_lines, style runs, colors, and optional-field presence.
+Rotation, image fit, and opacity also remain fixed under the current edit policy.
+Do not infer headline/body/CTA roles from IDs.
+
+The implemented proportional repair already scales text font size with its
+uniform scale, floored at 1 px. The future S04 optimizer must explicitly search
+font size alongside boxes: seed from proportional scaling, evaluate smaller and
+larger size proposals, and retain only validated candidates. Renderer-aware
+measurement should consider actual fonts, wrapping, style runs, line spacing,
+and max_lines. Preserve all content when it overflows; try another box, font
+size, or composition instead of rewriting/truncating it. Without dependable
+measurement, mark text-fit diagnostics as unverified rather than claiming fit.
+Preferred readability thresholds and preservation of source size hierarchy are
+soft quality terms; the schema's 1 px minimum is the hard numeric floor, not a
+readability guarantee. The graph/ranker must receive each candidate's actual
+font size (columns 53:55), including when two candidates have identical boxes.
+
+Candidate dimension minimums are not invented as hard contest rules. Preserve
+zero-area lines and allowed zero-area elements under the S02 schema; do not
+impose invalid positive-area requirements. Font-size search and renderer-aware
+optimization remain proposed; graph_v3 feature extraction is implemented.
 
 Two-stage solver:
 
 1. **Discrete layout-family and region assignment** chooses a composition pattern and ordering of internal units. Use enumeration/beam search initially; optionally OR-Tools CP-SAT for discrete assignments and selective mutually exclusive foreground-rectangle packing.
-2. **Continuous/local geometry refinement** adjusts positions, scale, and gaps, measuring constraint violations after each move; a deterministic coordinate-descent/random-restart implementation is sufficient for v0.1. CP-SAT is not required for rotations, arbitrary render-aware text, or all soft metrics.
+2. **Continuous/local geometry refinement** adjusts positions, scale, gaps, and text font size, measuring constraint violations after each move; a deterministic coordinate-descent/random-restart implementation is sufficient for v0.1. CP-SAT is not required for rotations, arbitrary render-aware text, or all soft metrics.
 
 Never add `NoOverlap2D` over every element. Background and decorative layers often intentionally overlap foreground content; only include confirmed conflicting foreground pairs in optional packing constraints.
 
@@ -404,7 +447,7 @@ Canonical record (one judgment per row):
   "annotator_id": "local_pseudonym",
   "generator_version": "generator_v1",
   "renderer_version": "renderer_v1",
-  "feature_version": "graph_v1",
+  "feature_version": "graph_v3",
   "created_at_utc": "ISO_8601_timestamp"
 }
 ```
@@ -476,7 +519,7 @@ Future multi-candidate/GNN integration must filter invalid candidates before sco
 
 **Representation/invariance:** use all three Adobe fixtures if accessible. Round-trip source JSON exactly as decoded; preserve null vs absent, numeric types, array order, extension objects, literal text, asset IDs, group IDs, and source canvas. Assert candidate source is unchanged after generation and serialization. Preserve advanced missing-asset reference.
 
-**Graph:** N=1 -> one node, zero explicit edges; N=4 -> 12 directed edges; N=17 -> 272 directed edges. Duplicate IDs must be rejected upstream. For `group_id=None`, `group_id=ABSENT`, and `group_id=''`, assert correct `same_explicit_group` behavior. For negative `x/y`, zero width/height, and rotated boxes, assert finite graph values and no stored-data mutations. Reverse edge relative-displacement signs must be opposites. Every candidate for the same source has the exact same ordered IDs and edge-index topology. Check `x_numeric.shape==(N,53)`, `text_vec==(N,384)`, `text_mask==(N,1)`, `edge_attr==(E,31)`, output scalar finite.
+**Graph:** N=1 -> one node, zero explicit edges; N=4 -> 12 directed edges; N=17 -> 272 directed edges. Duplicate IDs must be rejected upstream. For `group_id=None`, `group_id=ABSENT`, and `group_id=''`, assert correct `same_explicit_group` behavior. For negative `x/y`, zero width/height, and rotated boxes, assert finite graph values and no stored-data mutations. Reverse edge relative-displacement signs must be opposites. Every candidate for the same source has the exact same ordered IDs and edge-index topology. Check `x_numeric.shape==(N,57)`, `text_vec==(N,384)`, `text_mask==(N,1)`, `edge_attr==(E,31)`, output scalar finite.
 
 **Model:** shape tests on CPU and GPU; deterministic eval with dropout disabled; no NaN on all-zero text embeddings; batched graphs retain separate pooling outputs; reject checkpoint dimension/version mismatch. Confirm text availability behavior using a numeric-only checkpoint where needed. Attention returned for debugging must not be exposed as object-importance labels.
 

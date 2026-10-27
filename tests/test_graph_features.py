@@ -70,7 +70,7 @@ def edges(graph):
 def assert_graph_contract(graph, n, e):
     assert isinstance(graph, Data)
     assert graph.num_nodes == n
-    assert graph.x_numeric.shape == (n, 53)
+    assert graph.x_numeric.shape == (n, 57)
     assert graph.text_vec.shape == (n, 384)
     assert graph.text_mask.shape == (n, 1)
     assert graph.edge_index.shape == (2, e)
@@ -83,7 +83,7 @@ def assert_graph_contract(graph, n, e):
         assert tensor.device.type == "cpu"
         assert torch.isfinite(tensor).all()
         assert not tensor.requires_grad
-    assert graph.context_version == "graph_v1"
+    assert graph.context_version == "graph_v3"
     assert graph.validate(raise_on_error=True)
 
 
@@ -107,7 +107,8 @@ def test_feature_names_lock_the_complete_order():
         "fit_cover fit_fill shape_rectangle shape_ellipse shape_line fill_r fill_g fill_b "
         "fill_parse_mask text_r text_g text_b text_parse_mask has_group group_size_fraction "
         "candidate_x candidate_y candidate_width candidate_height center_delta_x center_delta_y "
-        "width_log_change height_log_change target_log_aspect canvas_width_log_change canvas_height_log_change"
+        "width_log_change height_log_change target_log_aspect canvas_width_log_change canvas_height_log_change "
+        "candidate_font_size_log font_size_log_change fill_alpha text_alpha"
     ).split()
     expected_edges = (
         "source_dx source_dy source_gap_x source_gap_y source_iou source_i_contains_j "
@@ -119,11 +120,11 @@ def test_feature_names_lock_the_complete_order():
     ).split()
     assert list(NODE_FEATURE_NAMES) == expected_nodes
     assert list(EDGE_FEATURE_NAMES) == expected_edges
-    assert len(set(NODE_FEATURE_NAMES)) == 53
+    assert len(set(NODE_FEATURE_NAMES)) == 57
     assert len(set(EDGE_FEATURE_NAMES)) == 31
     assert dict(NODE_FEATURE_INDEX) == {name: i for i, name in enumerate(expected_nodes)}
     assert dict(EDGE_FEATURE_INDEX) == {name: i for i, name in enumerate(expected_edges)}
-    assert FEATURE_CONTRACT_VERSION == "graph_v1"
+    assert FEATURE_CONTRACT_VERSION == "graph_v3"
 
 
 @pytest.mark.parametrize("filename,n,e", SAMPLES)
@@ -186,9 +187,48 @@ def test_complete_text_node_vector_uses_source_style_and_target_geometry():
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170 / 255, 187 / 255, 204 / 255, 1,
         1, 1, .2, .2, .3, .3, .1, .15, math.log(121 / 61) / 4, math.log(61 / 21) / 4,
         math.log(2) / 4, math.log(2) / 4, math.log(2) / 4,
+        math.log(25) / math.log(401), 0, 0, 1,
     ]
     torch.testing.assert_close(graph.x_numeric[0], torch.tensor(expected), atol=1e-7, rtol=1e-6)
     assert graph.element_ids == ("z", "a")
+
+
+def test_font_only_candidate_edits_are_visible_and_joined_by_id():
+    source = design(element("a", "text", font_size=60), element("b", "text", font_size=30),
+                    element("c", "image"))
+    target = Canvas(width=200, height=300)
+    first = candidate_for(source, target)
+    second = candidate_for(source, target, {"a": {"font_size": 12}}, reverse=True)
+    before = (source.to_adobe(), first.to_adobe(), second.to_adobe())
+    a = build_candidate_graph(source, first, target)
+    b = build_candidate_graph(source, second, target)
+    assert torch.equal(a.x_numeric[:, :53], b.x_numeric[:, :53])
+    assert not torch.equal(a.x_numeric[0, 53:55], b.x_numeric[0, 53:55])
+    torch.testing.assert_close(b.x_numeric[0, 53:55], torch.tensor([
+        math.log1p(12) / math.log1p(300), math.log(12 / 60) / 4,
+    ]))
+    assert torch.equal(a.x_numeric[1:], b.x_numeric[1:])
+    assert b.x_numeric[2, 53:55].tolist() == [0, 0]
+    for name in ("text_vec", "text_mask", "edge_index", "edge_attr"):
+        assert torch.equal(a[name], b[name])
+    assert before == (source.to_adobe(), first.to_adobe(), second.to_adobe())
+
+
+@pytest.mark.parametrize("original,proposed", [(1, 1), (12, 60), (60, 12), (1, 10**300), (10**300, 1)])
+def test_font_features_handle_growth_shrinkage_minimum_and_extremes(original, proposed):
+    source = design(element("a", "text", font_size=original), width=1, height=1)
+    candidate = candidate_for(source, updates={"a": {"font_size": proposed}})
+    graph = build_candidate_graph(source, candidate, source.canvas)
+    assert torch.isfinite(graph.x_numeric).all()
+    assert graph.x_numeric[0, 53].item() == pytest.approx(math.log1p(proposed) / math.log(2))
+    assert graph.x_numeric[0, 54].item() == pytest.approx(
+        max(-4, min(4, math.log(proposed) - math.log(original))) / 4)
+
+
+def test_nontext_font_extensions_do_not_become_typography_features():
+    source = design(element("a", "image", font_size=12))
+    candidate = candidate_for(source, updates={"a": {"font_size": 60}})
+    assert build_candidate_graph(source, candidate, source.canvas).x_numeric[0, 53:55].tolist() == [0, 0]
 
 
 @pytest.mark.parametrize("kind,option,slot", [
@@ -240,15 +280,100 @@ def test_rotation_in_degrees(angle, sine, cosine):
 @pytest.mark.parametrize("literal,expected", [
     ("#abc", [170 / 255, 187 / 255, 204 / 255, 1]),
     ("#00FF80", [0, 1, 128 / 255, 1]),
-    ("#00ff8000", [0, 1, 128 / 255, 1]),  # Alpha is intentionally not a v1 feature.
-    ("rgba(1,2,3,1)", [0, 0, 0, 0]), ("red", [0, 0, 0, 0]),
-    ("#abcd", [0, 0, 0, 0]), ("#gggggg", [0, 0, 0, 0]), (" #fff ", [0, 0, 0, 0]),
+    ("#00ff8000", [0, 1, 128 / 255, 1]),  # RGB/mask are independent of alpha, now encoded separately.
+    ("rgba(1,2,3,1)", [1 / 255, 2 / 255, 3 / 255, 1]), ("red", [0, 0, 0, 0]),
+    ("#abcd", [170 / 255, 187 / 255, 204 / 255, 1]), ("#gggggg", [0, 0, 0, 0]), (" #fff ", [1, 1, 1, 1]),
 ])
 @pytest.mark.parametrize("kind,start,key", [("text", 36, "color"), ("shape", 32, "fill_color")])
 def test_hex_colors_and_parse_masks(literal, expected, kind, start, key):
     source = design(element(type=kind, **{key: literal}))
     graph = build_candidate_graph(source, source, source.canvas)
     torch.testing.assert_close(graph.x_numeric[0, start:start + 4], torch.tensor(expected, dtype=torch.float32))
+    assert source.to_adobe()["elements"][0][key] == literal
+
+
+FIXTURE_COLORS = {
+    "rgba(255,255,255,1)": (255, 255, 255, 1),
+    "rgba(232,106,58,1)": (232, 106, 58, 1),
+    "rgba(240,178,66,1)": (240, 178, 66, 1),
+    "rgba(255,255,255,0.85)": (255, 255, 255, .85),
+    "rgba(255,255,255,0.9)": (255, 255, 255, .9),
+    "rgba(255,255,255,0.6)": (255, 255, 255, .6),
+    "rgba(43,27,46,1)": (43, 27, 46, 1),
+    "rgba(220,60,50,1)": (220, 60, 50, 1),
+}
+
+
+@pytest.mark.parametrize("filename,n,e", SAMPLES)
+def test_actual_adobe_fixture_text_and_shape_colors(filename, n, e):
+    task = json.loads((ROOT / "input" / filename).read_text(encoding="utf-8"))
+    original = deepcopy(task)
+    source = Design.from_adobe(task["source"])
+    target = Canvas.from_adobe(task["target_canvas"])
+    candidate = candidate_for(source, target, reverse=True)
+    graph = build_candidate_graph(source, candidate, target)
+    assert_graph_contract(graph, n, e)
+    for i, item in enumerate(task["source"]["elements"]):
+        if item["type"] == "image":
+            assert torch.count_nonzero(graph.x_numeric[i, 32:40]) == 0
+            assert graph.x_numeric[i, 55:57].tolist() == [0, 0]
+            continue
+        is_text = item["type"] == "text"
+        start, alpha_column = (36, 56) if is_text else (32, 55)
+        literal = item["color" if is_text else "fill_color"]
+        red, green, blue, alpha = FIXTURE_COLORS[literal]
+        torch.testing.assert_close(graph.x_numeric[i, start:start + 4], torch.tensor([
+            red / 255, green / 255, blue / 255, 1,
+        ]))
+        assert graph.x_numeric[i, alpha_column].item() == pytest.approx(alpha)
+        assert graph.x_numeric[i, 13].item() == pytest.approx(item.get("opacity", 1))
+        # Exercise literals appearing only in a style run through the same text
+        # parser; run-level pooling is not part of this feature contract.
+        for run in item.get("style_runs", []):
+            r, g, b, a = FIXTURE_COLORS[run["color"]]
+            run_source = design(element(type="text", color=run["color"]))
+            run_graph = build_candidate_graph(run_source, run_source, run_source.canvas)
+            torch.testing.assert_close(run_graph.x_numeric[0, 36:40], torch.tensor([r / 255, g / 255, b / 255, 1]))
+            assert run_graph.x_numeric[0, 56].item() == pytest.approx(a)
+    assert source.to_adobe() == original["source"]
+    assert task == original
+    assert candidate.to_adobe() == candidate_for(source, target, reverse=True).to_adobe()
+
+
+@pytest.mark.parametrize("kind,start,key,alpha_column", [("text", 36, "color", 56), ("shape", 32, "fill_color", 55)])
+@pytest.mark.parametrize("literal,expected", [
+    (" rgba(232, 106, 58, .6) ", [232 / 255, 106 / 255, 58 / 255, .6]),
+    ("RGB(0, 127.5, 255)", [0, .5, 1, 1]),
+    ("rgba(0,0,0,0)", [0, 0, 0, 0]),
+    ("rgba(255,255,255,0)", [1, 1, 1, 0]),
+    ("#00ff8080", [0, 1, 128 / 255, 128 / 255]),
+    ("#abcd", [170 / 255, 187 / 255, 204 / 255, 221 / 255]),
+    ("rgba(2.55e2,0,0,1e-1)", [1, 0, 0, .1]),
+])
+def test_supported_colors_preserve_alpha_separately_from_opacity(kind, start, key, alpha_column, literal, expected):
+    source = design(element(type=kind, opacity=.4, **{key: literal}))
+    before = source.to_adobe()
+    row = build_candidate_graph(source, source, source.canvas).x_numeric[0]
+    torch.testing.assert_close(row[start:start + 4], torch.tensor([*expected[:3], 1], dtype=torch.float32))
+    assert row[alpha_column].item() == pytest.approx(expected[3])
+    assert row[13].item() == pytest.approx(.4)
+    assert source.to_adobe() == before
+
+
+@pytest.mark.parametrize("literal", [
+    "rgba(255,0,0)", "rgb(255,0,0,1)", "rgba(255,0,0,1)junk",
+    "rgba(256,0,0,1)", "rgba(-1,0,0,1)", "rgba(0,0,0,1.1)",
+    "rgba(0,0,0,-.1)", "rgba(nan,0,0,1)", "rgba(0,0,0,inf)",
+    "rgba(1e999,0,0,1)", "rgba(0,0,0,1e999)", "rgba(1,,2,1)",
+    "rgb(100%,0%,0%)", "rgb(255 0 0 / .5)", "red", "", "#gggggg",
+])
+@pytest.mark.parametrize("kind,start,key,alpha_column", [("text", 36, "color", 56), ("shape", 32, "fill_color", 55)])
+def test_unsupported_colors_are_masked_without_rewriting_json(literal, kind, start, key, alpha_column):
+    source = design(element(type=kind, **{key: literal}))
+    row = build_candidate_graph(source, source, source.canvas).x_numeric[0]
+    assert row[start:start + 4].tolist() == [0, 0, 0, 0]
+    assert row[alpha_column] == 0
+    assert torch.isfinite(row).all()
     assert source.to_adobe()["elements"][0][key] == literal
 
 
@@ -602,7 +727,7 @@ def test_pyg_batching_and_edge_aware_layer_forward_backward_on_cpu():
     batch = Batch.from_data_list(graphs)
     assert batch.num_nodes == 22
     assert batch.ptr.tolist() == [0, 1, 5, 22]
-    assert batch.x_numeric.shape == (22, 53)
+    assert batch.x_numeric.shape == (22, 57)
     assert batch.edge_index.shape == (2, 284)
     assert torch.equal(batch.edge_index[:, :12], graphs[1].edge_index + 1)
     assert torch.equal(batch.edge_index[:, 12:], graphs[2].edge_index + 5)
@@ -612,7 +737,7 @@ def test_pyg_batching_and_edge_aware_layer_forward_backward_on_cpu():
         assert torch.equal(restored.x_numeric, original.x_numeric)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(7)
-        layer = GATv2Conv(53, 4, heads=2, edge_dim=31, add_self_loops=True, fill_value=0.0).cpu()
+        layer = GATv2Conv(57, 4, heads=2, edge_dim=31, add_self_loops=True, fill_value=0.0).cpu()
         output = layer(batch.x_numeric, batch.edge_index, batch.edge_attr)
         assert output.shape == (22, 8)
         assert torch.isfinite(output).all()

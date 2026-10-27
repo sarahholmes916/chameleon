@@ -101,20 +101,55 @@ def rewrite_manifest(path, change):
     torch.save(payload, path)
 
 
+def test_ranker_receives_candidate_typography_and_can_learn_from_it():
+    source = source_design(1)
+    candidate = source.to_adobe()
+    candidate["elements"][0]["font_size"] = 60
+    small = build_candidate_graph(source, source, source.canvas)
+    large = build_candidate_graph(source, Design.from_adobe(candidate), source.canvas)
+    batch = Batch.from_data_list([small, large])
+    batch.x_numeric.requires_grad_(True)
+    model = LayoutRanker().eval()
+    scores = model(batch)
+    # Fixed seed verifies sensitivity/mechanics, not which typography is better.
+    assert scores[0].item() != scores[1].item()
+    scores.sum().backward()
+    assert torch.isfinite(batch.x_numeric.grad).all()
+    assert torch.all(batch.x_numeric.grad[:, 53:55].abs().sum(dim=0) > 0)
+
+
+@pytest.mark.parametrize("width", [53, 55])
+def test_old_graph_width_is_rejected_even_if_version_is_relabelled(width):
+    graph = graph_for()
+    graph.x_numeric = graph.x_numeric[:, :width]
+    with pytest.raises(ValueError):
+        LayoutRanker()(graph)
+
+
+@pytest.mark.parametrize("version,width", [("gatv2_ranker_v1", 53), ("gatv2_ranker_v2", 55)])
+def test_old_ranker_architecture_checkpoint_is_rejected(tmp_path, version, width):
+    path = tmp_path / "old.pt"
+    save_ranker_checkpoint(path, LayoutRanker(), training_metadata=provenance())
+    rewrite_manifest(path, lambda manifest: manifest["architecture"].update(
+        version=version, numeric_dim=width))
+    with pytest.raises(CheckpointUnavailable, match="incompatible"):
+        load_ranker_checkpoint(path)
+
+
 def test_exact_s03_architecture_and_versions():
     model = LayoutRanker()
-    assert RANKER_VERSION == "gatv2_ranker_v1"
+    assert RANKER_VERSION == "gatv2_ranker_v3"
     assert CHECKPOINT_VERSION == "ranker_checkpoint_v1"
     assert (model.text_projection.in_features, model.text_projection.out_features) == (384, 32)
     assert len(model.convs) == len(model.skips) == len(model.norms) == 3
-    for conv, width in zip(model.convs, (86, 128, 128)):
+    for conv, width in zip(model.convs, (90, 128, 128)):
         assert (conv.in_channels, conv.out_channels, conv.heads, conv.edge_dim) == (width, 32, 4, 31)
         assert conv.concat and conv.add_self_loops
         assert conv.fill_value == 0.0
         assert conv.dropout == 0.0
         assert not conv.share_weights and conv.res is None
     assert isinstance(model.skips[0], nn.Linear)
-    assert (model.skips[0].in_features, model.skips[0].out_features) == (86, 128)
+    assert (model.skips[0].in_features, model.skips[0].out_features) == (90, 128)
     assert all(isinstance(skip, nn.Identity) for skip in model.skips[1:])
     assert all(isinstance(norm, nn.LayerNorm) and norm.normalized_shape == (128,) for norm in model.norms)
     assert model.feature_dropout.p == model.head[2].p == 0.1
@@ -225,11 +260,11 @@ def test_backprop_uses_candidate_geometry_edges_and_trainable_text_projection():
     handle = model.convs[0].register_forward_pre_hook(lambda _module, args: captured.append(args[0].detach().clone()))
     model(graph).square().mean().backward()
     handle.remove()
-    assert captured[0].shape == (4, 86)
-    assert torch.equal(captured[0][:, :53], graph.x_numeric)
+    assert captured[0].shape == (4, 90)
+    assert torch.equal(captured[0][:, :57], graph.x_numeric)
     assert torch.equal(captured[0][:, -1:], graph.text_mask)
-    assert torch.count_nonzero(captured[0][graph.text_mask[:, 0] == 0, 53:85]) == 0
-    assert captured[0][:, 53:85].min() >= 0  # ReLU projection.
+    assert torch.count_nonzero(captured[0][graph.text_mask[:, 0] == 0, 57:89]) == 0
+    assert captured[0][:, 57:89].min() >= 0  # ReLU projection.
     assert graph.text_vec.grad is None  # Frozen external embeddings.
     assert graph.x_numeric.grad[:, 42:50].abs().sum() > 0
     assert graph.edge_attr.grad.abs().sum() > 0
@@ -270,6 +305,7 @@ def test_sparse_graph_requires_declared_topology_and_runs_when_declared():
 
 
 @pytest.mark.parametrize("field,value,message", [
+    ("context_version", "graph_v1", "feature version"),
     ("context_version", "graph_v2", "feature version"),
     ("graph_topology", "unknown", "topology"),
     ("text_encoder_version", "different", "encoder version"),
@@ -391,7 +427,7 @@ def test_checkpoint_round_trip_manifest_hashes_and_rng_preservation(tmp_path, mo
     payload = torch.load(path, weights_only=True)
     manifest = payload["manifest"]
     assert manifest["checkpoint_version"] == CHECKPOINT_VERSION
-    assert manifest["numeric_feature_version"] == manifest["edge_feature_version"] == "graph_v1"
+    assert manifest["numeric_feature_version"] == manifest["edge_feature_version"] == "graph_v3"
     assert manifest["architecture"]["pyg_version"] == "2.8.1"
     assert manifest["runtime_versions"]["pyg"] == "2.8.1"
     assert len(manifest["weights_sha256"]) == len(payload["manifest_sha256"]) == 64
@@ -415,8 +451,9 @@ def test_checkpoint_round_trip_manifest_hashes_and_rng_preservation(tmp_path, mo
 
 
 @pytest.mark.parametrize("field,value", [
-    ("checkpoint_version", "future"), ("numeric_feature_version", "graph_v2"),
-    ("edge_feature_version", "graph_v2"),
+    ("checkpoint_version", "future"), ("numeric_feature_version", "graph_v1"),
+    ("edge_feature_version", "graph_v1"),
+    ("numeric_feature_version", "graph_v2"), ("edge_feature_version", "graph_v2"),
     ("architecture", {"version": "different", "numeric_dim": 54}),
 ])
 def test_incompatible_checkpoint_versions_and_dimensions_rejected(tmp_path, field, value):

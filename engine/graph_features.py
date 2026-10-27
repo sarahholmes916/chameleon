@@ -1,4 +1,4 @@
-"""S03 graph_v1: deterministic source/candidate graphs, not layout scores.
+"""S03 graph_v3: deterministic source/candidate graphs, not layout scores.
 
 Feature order follows docs/S03-S06_layout_engine_technical_spec.md sections 3–4.
 No Adobe data is changed, and no candidate is certified as contest-compliant.
@@ -19,7 +19,7 @@ from engine.internal_schema import ABSENT, Canvas, Design, Element
 from engine.text_embeddings import TEXT_DIMENSION, TextEmbeddingCache
 
 
-FEATURE_CONTRACT_VERSION = "graph_v1"
+FEATURE_CONTRACT_VERSION = "graph_v3"
 NODE_FEATURE_NAMES = (
     "type_text", "type_image", "type_shape",
     "source_x", "source_y", "source_width", "source_height",
@@ -35,6 +35,8 @@ NODE_FEATURE_NAMES = (
     "candidate_x", "candidate_y", "candidate_width", "candidate_height",
     "center_delta_x", "center_delta_y", "width_log_change", "height_log_change",
     "target_log_aspect", "canvas_width_log_change", "canvas_height_log_change",
+    "candidate_font_size_log", "font_size_log_change",
+    "fill_alpha", "text_alpha",
 )
 EDGE_FEATURE_NAMES = (
     "source_dx", "source_dy", "source_gap_x", "source_gap_y", "source_iou",
@@ -50,7 +52,7 @@ EDGE_FEATURE_NAMES = (
 )
 NODE_FEATURE_INDEX = MappingProxyType({name: i for i, name in enumerate(NODE_FEATURE_NAMES)})
 EDGE_FEATURE_INDEX = MappingProxyType({name: i for i, name in enumerate(EDGE_FEATURE_NAMES)})
-NODE_DIMENSION = 53
+NODE_DIMENSION = 57
 EDGE_DIMENSION = 31
 
 
@@ -107,17 +109,37 @@ class _Box:
         return _Box(self.x / w, self.y / h, self.width / w, self.height / h)
 
 
-def _hex_rgb(value: str) -> tuple[float, float, float, float]:
-    if re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})", value) is None:
-        return 0.0, 0.0, 0.0, 0.0
-    digits = value[1:]
-    if len(digits) == 3:
-        digits = "".join(char * 2 for char in digits)
-    return tuple(int(digits[i:i + 2], 16) / 255 for i in (0, 2, 4)) + (1.0,)
+def _color_rgba(value: str) -> tuple[float, float, float, float, float]:
+    """Parse supported literals to RGBA + availability, without editing JSON.
+
+    Supports hex and comma-separated numeric rgb()/rgba(), including the Adobe
+    fixtures. Unsupported/malformed/out-of-range literals have zero availability.
+    This is a deliberately bounded parser, not a full browser CSS implementation.
+    """
+    literal = value.strip()
+    if re.fullmatch(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})", literal):
+        digits = literal[1:]
+        if len(digits) in (3, 4):
+            digits = "".join(char * 2 for char in digits)
+        rgb = tuple(int(digits[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        alpha = int(digits[6:8], 16) / 255 if len(digits) == 8 else 1.0
+        return (*rgb, alpha, 1.0)
+    match = re.fullmatch(r"(rgb|rgba)\(\s*(.*?)\s*\)", literal, flags=re.IGNORECASE)
+    if match:
+        parts = [part.strip() for part in match[2].split(",")]
+        count = 4 if match[1].lower() == "rgba" else 3
+        number = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+        if len(parts) == count and all(re.fullmatch(number, part) for part in parts):
+            values = [float(part) for part in parts]
+            alpha = values[3] if count == 4 else 1.0
+            if (all(math.isfinite(v) and 0 <= v <= 255 for v in values[:3])
+                    and math.isfinite(alpha) and 0 <= alpha <= 1):
+                return (*(v / 255 for v in values[:3]), alpha, 1.0)
+    return 0.0, 0.0, 0.0, 0.0, 0.0
 
 
 def _node_features(
-    element: Element, source_box: _Box, candidate_box: _Box,
+    element: Element, proposed: Element, source_box: _Box, candidate_box: _Box,
     source_canvas: Canvas, target: Canvas, group_size: int, count: int,
 ) -> list[float]:
     src = source_box.normalized(source_canvas)
@@ -150,8 +172,10 @@ def _node_features(
             for fit in ("contain", "cover", "fill")]
     row += [float(element.type == "shape" and element.shape_type == shape)
             for shape in ("rectangle", "ellipse", "line")]
-    row += list(_hex_rgb(element.fill_color)) if element.type == "shape" else [0.0] * 4
-    row += list(_hex_rgb(element.color)) if element.type == "text" else [0.0] * 4
+    fill = _color_rgba(element.fill_color) if element.type == "shape" else (0.0,) * 5
+    text_color = _color_rgba(element.color) if element.type == "text" else (0.0,) * 5
+    row += [*fill[:3], fill[4]]
+    row += [*text_color[:3], text_color[4]]
     row += [float(isinstance(element.group_id, str)), group_size / count]
     row += [_clip(cand.x, -4, 4), _clip(cand.y, -4, 4),
             _clip(cand.width, 0, 4), _clip(cand.height, 0, 4)]
@@ -161,6 +185,11 @@ def _node_features(
     row += [_log_ratio(Fraction(target.width), Fraction(target.height), 4),
             _log_ratio(Fraction(target.width), Fraction(source_canvas.width), 4),
             _log_ratio(Fraction(target.height), Fraction(source_canvas.height), 4)]
+    row += [
+        _log1p(proposed.font_size) / _log1p(max(target.width, target.height)),
+        _log_ratio(Fraction(proposed.font_size), Fraction(element.font_size), 4),
+    ] if element.type == "text" else [0.0, 0.0]
+    row += [fill[3], text_color[3]]
     return row
 
 
@@ -291,10 +320,10 @@ def build_candidate_graph(
     cand_boxes = [_Box.of(element) for element in matched]
     pairs = _edge_pairs(source.elements, src_boxes, source.source_canvas)
     nodes = [
-        _node_features(element, a, b, source.source_canvas, target,
+        _node_features(element, proposed, a, b, source.source_canvas, target,
                        len(source.groups[element.group_id]) if isinstance(element.group_id, str) else 0,
                        count)
-        for element, a, b in zip(source.elements, src_boxes, cand_boxes)
+        for element, proposed, a, b in zip(source.elements, matched, src_boxes, cand_boxes)
     ]
     vectors = torch.zeros((count, TEXT_DIMENSION), dtype=torch.float32, device="cpu")
     masks = torch.zeros((count, 1), dtype=torch.float32, device="cpu")

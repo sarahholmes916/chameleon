@@ -36,18 +36,18 @@ The feature order and formulas are those of
 [S03 sections 3.3 and 4.1](S03-S06_layout_engine_technical_spec.md#33-exact-31-dimensional-edge-feature-contract).
 `NODE_FEATURE_NAMES` and `EDGE_FEATURE_NAMES` list every feature in order;
 the read-only `NODE_FEATURE_INDEX` and `EDGE_FEATURE_INDEX` map names to columns.
-`FEATURE_CONTRACT_VERSION` is `"graph_v1"`.
+`FEATURE_CONTRACT_VERSION` is `"graph_v3"`.
 
 | Field | Shape / type |
 | --- | --- |
-| `x_numeric` | `[N, 53]`, CPU `torch.float32` |
+| `x_numeric` | `[N, 57]`, CPU `torch.float32` |
 | `text_vec` | `[N, 384]`, CPU `torch.float32` |
 | `text_mask` | `[N, 1]`, CPU `torch.float32` |
 | `edge_index` | `[2, E]`, CPU `torch.int64` |
 | `edge_attr` | `[E, 31]`, CPU `torch.float32` |
 | `element_ids` | Tuple of original IDs in source order |
 | `num_nodes` | Explicit `N`, including a one-node graph with no edges |
-| `context_version` | `"graph_v1"` |
+| `context_version` | `"graph_v3"` |
 | `graph_topology` | `"dense_v1"` or `"sparse_v1"` |
 | `text_encoder_version` | Provider's version identity, or `"none"` |
 | `text_embedding_status` | `"complete"`, `"partial"`, `"none"`, or `"no_text"` |
@@ -59,11 +59,23 @@ accepted by S02. Log ratios use differences of logs to avoid overflow/underflow
 of intermediate ratios. This changes numerical evaluation, not the formulas.
 
 The model receives no learned priorities, semantic role labels, or inferred
-groups. Hex colors support exactly `#RGB`, `#RRGGBB`, and `#RRGGBBAA`. Alpha is
-not encoded in graph_v1's RGB features. Unsupported strings, including the
-samples' `rgba(...)` values, yield zero RGB and a zero parse mask, preserving
-their literal Adobe values. Supporting additional color formats would require
-a reviewed feature-contract change.
+groups. Text `color` and shape `fill_color` support the samples' numeric
+comma-separated `rgb(r,g,b)` and `rgba(r,g,b,a)`, plus `#RGB`, `#RGBA`,
+`#RRGGBB`, and `#RRGGBBAA`. RGB channels must be finite numbers in [0,255];
+alpha must be finite in [0,1]. Decimal/exponent notation, case-insensitive
+function names, and surrounding/channel whitespace are supported. Percentages,
+named colors, space/slash CSS syntax, malformed literals, and out-of-range
+channels are unsupported and produce zero RGB, alpha, and parse mask.
+This bounded feature parser is not a full CSS renderer; it never rewrites JSON.
+
+RGB and availability remain at columns 32:36 for shape fills and 36:40 for
+text. graph_v3 appends `fill_alpha` at column 55 and `text_alpha` at column 56.
+Absent hex/rgb alpha defaults to 1 for successfully parsed colors. A transparent
+color has alpha 0 **and parse mask 1**, unlike an unsupported color. Alpha is
+separate from element opacity (column 13); RGB is not premultiplied. Fields
+irrelevant to the element type are zero. These are source style features:
+candidate color edits remain forbidden by the output policy. Style-run colors
+and strokes are preserved in JSON but are not separately pooled into node colors.
 
 ## Explicit conventions within the S03 contract
 
@@ -85,8 +97,27 @@ a reviewed feature-contract change.
   clipped; clipping each center before subtraction would change the contract.
 - Source normalized widths/heights/area and candidate normalized dimensions
   have range `[0, 4]`; signed normalized geometry has range `[-4, 4]`.
-- Text, style, group, stacking, and semantic features describe source elements.
-  Only the designated candidate geometry blocks use candidate properties.
+- Existing text/style/group/stacking/semantic features describe source elements.
+  Candidate geometry blocks and the new typography columns use candidate values.
+
+## Candidate typography (graph_v2)
+
+The typography revision retained columns 0:53 (color parsing was subsequently
+extended in graph_v3). Column 53, `candidate_font_size_log`, is
+`log1p(candidate.font_size) / log1p(max(target.width, target.height))` for text.
+Column 54, `font_size_log_change`, is
+`clip(log(candidate.font_size) - log(source.font_size), -4, 4) / 4`.
+Both are zero on non-text nodes, even if those nodes carry font-size extensions.
+Source font size remains at column 16. Candidate elements are matched by exact
+ID, so reordering cannot attach one element's font size to another node.
+
+A 60 px versus 12 px candidate now produces different graph tensors even when
+its box is identical. These features describe size, not measured glyph fit.
+Text embeddings, original feature order, and the 31 edge calculations are
+unchanged by the typography revision. That revision introduced graph_v2 with
+55 numeric columns; graph_v3 adds alpha and supports the fixture color syntax,
+giving a current ranker input of 57 + 32 + 1 = 90. Old graph_v1/v2 graphs and
+checkpoints must be rebuilt/retrained; there is no silent padding or conversion.
 
 ## Optional text embeddings
 
@@ -163,3 +194,10 @@ Official API references used to verify the integration:
 [PyG GATv2Conv](https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.GATv2Conv.html),
 and [SentenceTransformer](https://sbert.net/docs/package_reference/sentence_transformer/model.html).
 The installed PyG 2.8.1 API was also inspected and exercised locally.
+
+Color regression tests load all three actual Adobe sample files and check each
+text color and shape fill against explicit expected RGB/alpha values. The core
+sample's style-run-only orange is also exercised as a text-color literal, without
+claiming that the graph pools style-run colors. Tests cover transparency versus
+missingness, opacity independence, hex compatibility, malformed/unsupported
+inputs, and unchanged source/candidate JSON.

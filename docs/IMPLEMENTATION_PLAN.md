@@ -146,7 +146,14 @@ result = selected.design.to_adobe()
 - Each `LayoutCandidate` wraps a `Design` at the target canvas and carries a stable internal ID, layout family, generator seed, and generator version; it is **not** the Adobe output itself.
 - Maintain stable element IDs, element ordering, explicit `group_id` values, original source context, required-field handling, and unknown extension data.
 - Match elements by **exact ID**, never position or guessed roles.
-- Graph tensors in S03 v0.1 use `x_numeric[N,53]`, optional `text_vec[N,384]`, `text_mask[N,1]`, `edge_index[2,E]`, and `edge_attr[E,31]`. Feature order is locked by the technical spec; changes require versioning and tests.
+- Text candidates may change `font_size` (schema minimum 1 px) along with boxes;
+  font family, content, style runs, and other styling remain fixed. S04 must
+  search typography explicitly and pass candidate sizes to graph_v3. Its two
+  appended numeric features distinguish same-box candidates with different
+  font sizes. Renderer-aware text fitting remains separate planned work. Graph_v3 also
+  parses the supplied rgba text/fill colors and appends separate alpha features;
+  graph_v1/v2 checkpoints are incompatible and require retraining.
+- Graph tensors in S03 graph_v3 use `x_numeric[N,57]`, optional `text_vec[N,384]`, `text_mask[N,1]`, `edge_index[2,E]`, and `edge_attr[E,31]`. Feature order is locked by the technical spec; changes require versioning and tests.
 - The initial computational baseline must import **no** ML runtime dependency. `model_missing`, `model_incompatible`, and inference failures use deterministic ranking, never unvalidated GNN output.
 - A candidate failing hard constraints cannot become valid because it has a high GNN score. Explicitly handle **zero valid candidates**; never claim guaranteed feasibility on extreme targets.
 

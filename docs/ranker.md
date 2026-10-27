@@ -1,7 +1,7 @@
 # S03 GATv2 ranker foundation
 
 `engine/ranker.py` implements the scoring network in S03 section 5, consuming
-the [graph_v1 tensors](graph_features.md) and the existing S02 models. It also
+the [graph_v3 tensors](graph_features.md) and the existing S02 models. It also
 provides checkpoint persistence and an explicit candidate-scoring boundary.
 This is an implemented, untrained architecture. No human preference dataset,
 trained quality checkpoint, or measured aesthetic improvement is supplied.
@@ -23,14 +23,21 @@ returns shape `[1]`; a `Batch` returns `[B]` in graph order, without squeezing
 away the singleton batch dimension. Each scalar compares candidates under the
 same source and target; it is not a quality percentage or calibrated probability.
 
-The architecture identifier is `gatv2_ranker_v1`. Numeric and edge features
-retain `graph_v1`; no feature dimensions or order changed.
+The architecture identifier is `gatv2_ranker_v3`. Numeric and edge features
+use the shared `graph_v3` version. Numeric width is now 57, including candidate
+font size/change and source fill/text alpha. Numeric RGB features now parse the
+samples' rgba colors; the 31 edge values retain their existing definitions.
+The first GAT layer and residual input width is 90. Old graph_v1/v2 and
+gatv2_ranker_v1/v2 checkpoints are incompatible and rejected.
+The `ranker_checkpoint_v1` container format stays unchanged; its architecture
+and feature manifests enforce this migration. Rebuild graphs and train a new
+compatible checkpoint rather than padding inputs or reusing old weights.
 
 | Stage | Contract |
 | --- | --- |
 | Text | Detached `[N,384]` input, trainable `Linear(384,32)` + ReLU, multiplied by availability mask |
-| Concatenation | Numeric 53 + projected text 32 + mask 1 = 86 |
-| GAT stage 1 | `GATv2Conv(86,32,heads=4,concat=True,edge_dim=31)` plus `Linear(86,128)` skip |
+| Concatenation | Numeric 57 + projected text 32 + mask 1 = 90 |
+| GAT stage 1 | `GATv2Conv(90,32,heads=4,concat=True,edge_dim=31)` plus `Linear(90,128)` skip |
 | GAT stages 2–3 | `GATv2Conv(128,32,heads=4,concat=True,edge_dim=31)` plus identity skips |
 | Each stage | Add skip, per-node `LayerNorm(128)`, ELU; dropout after stages 1 and 2 only |
 | Pooling | Per-graph mean then max concatenated to 256 |
@@ -45,7 +52,7 @@ graph's edge arrays remain unchanged, including a singleton's empty edge list.
 Multiplying the text projection by its mask makes missing/non-text projections
 exactly zero even if the projection learns a bias. This specifies the previously
 unspecified mask application in S03 sections 4.2/5; it is recorded in the ranker
-architecture version and does not change graph_v1. The pretrained encoder is
+architecture version and is unchanged by the color revision. The pretrained encoder is
 external and frozen; gradients train the projection and GNN, not its vectors.
 
 ## Configuration and compatibility

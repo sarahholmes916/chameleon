@@ -52,7 +52,7 @@ Do **not** create all proposed files merely to match this table. Implement only 
 
 - **One graph per `(source design, candidate layout, target)`**, one node for each original element. Explicit Adobe groups are edge evidence, **not disconnected subgraphs**.
 - For `1 <= N <= 64`, use all `N(N-1)` directed non-self edges (for `N=17`, `E=272`); consult S03 for the deterministic sparse rule beyond 64 elements.
-- Feature contract v0.1: node numeric tensor `[N,53]`, optional text vectors `[N,384]` plus mask, directed `edge_index` `[2,E]`, edge features `[E,31]`. Match source/candidate elements by exact IDs, not sorted position.
+- Feature contract graph_v3: node numeric tensor `[N,57]`, optional text vectors `[N,384]` plus mask, directed `edge_index` `[2,E]`, edge features `[E,31]`. Match source/candidate elements by exact IDs, not sorted position.
 - Edge features capture geometry, alignment, grouping, optional text similarity, and stacking evidence. **GAT attention is not element importance, grouping truth, or a human-readable ranking.** Do not present it as such.
 - Initially train **one edge-aware GNN layout ranker** from human side-by-side preferences. Its output is a scalar *whole-candidate* score conditional on source and target; a node-priority or relation head needs separate training targets.
 - Generate candidate layouts computationally; filter for verified validity **before** aesthetic preference annotation/ranking. Preserve a pure-Python/no-checkpoint baseline path.
