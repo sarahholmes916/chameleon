@@ -46,8 +46,8 @@ jobs:
       - name: Lint core and CI helpers
         run: >-
           python -m ruff check --no-cache
-          engine/internal_schema.py engine/resize.py
-          tests/test_internal_schema.py tests/test_ci.py scripts
+          engine/internal_schema.py engine/resize.py engine/candidate_validator.py engine/layout_search.py
+          tests/test_internal_schema.py tests/test_ci.py tests/test_layout_search.py scripts
 
       - name: Run required core suites without ML dependencies
         run: python -m scripts.ci_tests core

@@ -3,8 +3,9 @@
 Status: the S02 foundation is implemented in
 [engine/internal_schema.py](../engine/internal_schema.py). Parsing, immutable
 models, derived views, and serialization are available. Controlled editing and
-stage-one layout validation remain proposed APIs. Resize and rendering behavior
-are unchanged.
+the model-level `validate_stage_one()` API remain proposed. A separate
+[output gate](output_validation.md) now validates and repairs resize outputs;
+rendering behavior is unchanged.
 
 ## Implemented milestone and shared interfaces
 

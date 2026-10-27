@@ -3,8 +3,10 @@
 **Version:** 0.1 proposed implementation baseline  
 **Date:** 2026-10-26  
 **Status:** S03 graph construction/feature extraction and the untrained GATv2
-ranker/checkpoint/scoring foundation are implemented. Generation, preference
-training/evaluation, and integration remain proposals.
+ranker/checkpoint/scoring foundation are implemented. A deterministic output
+validation gate, bounded repair search, and resize integration are also implemented
+(see [output validation](output_validation.md)). Diverse generation and preference
+training/evaluation remain proposals.
 See [M2A interfaces and verification](graph_features.md) and [ranker interfaces](ranker.md).
 **Dependencies:** S02 *Internal design representation*; Adobe v0.9 JSON schema; challenge RULES.md/FAQ.md; `engine/resize.py`  
 **Primary objective:** Given a structured Adobe source design and target canvas, produce a legally structured, constraint-checked resized design and, internally, several materially different alternatives. Learn candidate preferences from human side-by-side comparisons rather than treating heuristic scores as ground-truth labels.
@@ -79,14 +81,14 @@ class ScoredCandidate:
 
 def build_candidate_graph(source: Design, candidate: Design, target: Canvas) -> Data: ...
 def generate_candidates(source: Design, target: Canvas, config: LayoutConfig) -> list[LayoutCandidate]: ...
-def validate_candidate(source: Design, candidate: LayoutCandidate) -> ValidationReport: ...
+def validate_candidate(source: Design, candidate: Design, target: Canvas) -> ValidationReport: ...
 def score_candidates(source: Design, candidates: list[LayoutCandidate], target: Canvas) -> list[float]: ...
 def select_options(candidates: list[ScoredCandidate], k: int = 3) -> list[ScoredCandidate]: ...
 ```
 
 `Data` means a `torch_geometric.data.Data` graph with `x_numeric`, `text_vec`, `text_mask`, `edge_index`, `edge_attr`, `element_ids`, and a `context_version`. The model's public numeric result is a scalar score; no Adobe fields are changed by inference.
 
-**Failure policy:** if ranking or text-model loading fails, use the deterministic scorer. If no candidate passes all verified constraints, record explicit violations, attempt the declared repair/fallback sequence (§5.6), and do not falsely mark the result valid. The competition adapter should return the best obtainable structurally valid design if its interface cannot report failures, but such a result is not guaranteed to satisfy every rule; log that discrepancy during development.
+**Failure policy:** if ranking or text-model loading fails, use the deterministic scorer on validated candidates only. If no candidate passes, continue generation/repair using validation diagnostics (section 6.6). Never return, rank as eligible, or serialize a known-invalid candidate as the selected output. Exhausting an explicit search budget raises `NoFeasibleLayout`; it must not return a least-violating draft. This is search exhaustion, not proof that no solution exists.
 
 ---
 
@@ -352,7 +354,11 @@ If the challenge provides a hard ~5% source-box proportion tolerance, implement 
 
 ### 6.6 Repair/fallback and infeasibility
 
-When a proposal fails: (a) bound/translate eligible geometry; (b) shrink eligible boxes while enforcing official proportion and typography constraints; (c) use a different family; (d) include the deterministic scaled baseline among attempts; (e) select the candidate with zero hard violations when any exists. If no candidate is fully valid, return a structured `NoFeasibleLayout` diagnostic internally with the violated constraints; the competition adapter must still respect its prescribed return signature and should produce the least-violating structurally valid best-effort candidate only if the platform requires a JSON return. Never treat this as a validator pass or a guaranteed contest-compliant layout. For the 728×90 advanced target, explicitly log feasibility and compromises.
+Reject each failed proposal and feed its violations into the next generation/repair attempt. Continue until at least one candidate passes every implemented hard check. All baseline and repaired candidates pass through the same gate; no model score, timeout, or requirement to return JSON grants an exception. Revalidate the selected output before serialization. Never return a least-violating or structurally-valid-but-policy-invalid draft.
+
+The implemented `find_valid_layout(source, target, propose, max_attempts=8)` returns the first validated JSON snapshot and gives the prior `ValidationReport` to the proposer. The current deterministic proposer first tries scaling, then proportionally fits and translates the entire source composition, with progressively smaller retries. It is a basic geometric repair, not the full template optimizer. `resize()` uses this path without ML.
+
+A finite search budget prevents hangs on impossible constraints or a broken generator. On exhaustion raise `NoFeasibleLayout` with all attempt reports; do not return a design. Unexpected generator failures also propagate. The unchanged CLI writes outputs only after `resize()` returns, so this failure produces no new JSON/PNG for the failed task. Existing files from earlier runs are not deleted. A successful return certifies the documented gate, not render legibility or official aesthetic acceptance. See [implemented checks and limitations](output_validation.md).
 
 ## 7. Candidate option diversification
 
@@ -449,24 +455,22 @@ A GNN whose offline preference accuracy improves but whose end-to-end outputs do
 
 ## 12. End-to-end control flow
 
+The implemented output boundary uses the shared gate:
+
 ```python
+from engine.internal_schema import Canvas, Design
+from engine.layout_search import baseline_proposal, find_valid_layout
+
 def resize(source: dict, target_canvas: dict) -> dict:
     design = Design.from_adobe(source, target_canvas=target_canvas)
     target = Canvas.from_adobe(target_canvas)
-    candidates = generate_candidates(design, target, GENERATOR_CONFIG)
-    checked = [(c, validate_candidate(design, c)) for c in candidates]
-    valid = [c for c, report in checked if report.schema_ok and report.policy_ok and report.geometry_ok]
-    if valid:
-        try:
-            scores = score_candidates(design, valid, target)  # GNN if available
-        except (CheckpointUnavailable, ModelInferenceError):
-            scores = deterministic_scores(design, valid, target)
-        options = select_options(zip_candidates_scores(valid, scores), k=3)
-        return options[0].candidate.design.to_adobe()
-    return competition_best_effort_fallback(design, target, checked).to_adobe()
+    return find_valid_layout(
+        design, target,
+        lambda attempt, previous_report: baseline_proposal(design, target, attempt),
+    )
 ```
 
-The fallback's existence does **not** certify validity. Instrument logs so all unverified/failed checks are visible in development. `competition_best_effort_fallback` is a last-resort adapter policy, not an escape hatch for deleting original elements.
+Future multi-candidate/GNN integration must filter invalid candidates before scoring, keep generating if the valid set is empty, and revalidate the selected JSON before returning it. Pass an explicit compatible trained checkpoint and encoder cache to `score_candidates`; on ranker failure use deterministic scores **only over the valid set**. Neither ranking path may bypass the output gate. A bare graph/ranker call is not a legality check.
 
 ## 13. Required acceptance tests before merging
 
@@ -476,7 +480,7 @@ The fallback's existence does **not** certify validity. Instrument logs so all u
 
 **Model:** shape tests on CPU and GPU; deterministic eval with dropout disabled; no NaN on all-zero text embeddings; batched graphs retain separate pooling outputs; reject checkpoint dimension/version mismatch. Confirm text availability behavior using a numeric-only checkpoint where needed. Attention returned for debugging must not be exposed as object-importance labels.
 
-**Generator:** every returned candidate preserves exact ID count/order, original types/immutable fields, and target canvas. Run each family on warm-up/core/advanced designs; assert no candidate is marked valid if it violates a known rule. Check intentional background overlaps are not globally disallowed. Check infeasible layouts are not falsely passed. Diversity returns <=3 options and no exact duplicates.
+**Generator:** every returned candidate preserves exact ID count/order, original types/immutable fields, and target canvas. Run each family on warm-up/core/advanced designs; assert no candidate is marked valid if it violates a known rule. Check intentional background overlaps are not globally disallowed. Check invalid attempts are retried with diagnostics, a later valid attempt is returned, and exhaustion raises without emitting an invalid draft. Check infeasible layouts are not falsely passed. Diversity returns <=3 options and no exact duplicates.
 
 **Preference UI:** reversed display order does not invert canonical labels; comparisons have same source and target; no score leakage; tie/both-bad/skip recorded correctly; repeats retained; labels survive app restart; append-only data stored with renderer/generator versions.
 

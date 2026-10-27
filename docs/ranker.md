@@ -144,8 +144,10 @@ The model is a mutable PyTorch object; do not concurrently train it while scorin
 
 The caller owns S04 validity checks, deterministic fallback, sorting/selection,
 and S06 integration. This module checks graph identity compatibility but does
-not certify candidate legality. `engine/resize.py`, the baseline dependencies,
-S02, and rendering remain unchanged and do not import the ML stack.
+not certify candidate legality. The [resize output gate](output_validation.md)
+now rejects invalid outputs and retries geometric repair without importing ML.
+GNN selection is not integrated; future callers must filter invalid candidates
+before scoring and revalidate the selected output.
 
 ## Verification and remaining work
 
@@ -173,7 +175,7 @@ runtime and the competition's Apple hardware have not been tested.
 Next work is S05's source-disjoint preference dataset and training/evaluation
 pipeline, including the pooled MLP baseline. Reliable labels still depend on
 the teammate's validator and faithful renderer. No training pipeline, human
-labels, evaluated checkpoint, fallback scorer, or resize integration is included.
+labels, evaluated checkpoint, fallback scorer, or learned resize integration is included.
 
 Official API references:
 [GATv2Conv](https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.GATv2Conv.html),

@@ -12,7 +12,7 @@ import pytest
 
 
 SUITES = {
-    "core": ("tests/test_internal_schema.py", "tests/test_ci.py"),
+    "core": ("tests/test_internal_schema.py", "tests/test_ci.py", "tests/test_layout_search.py"),
     "ml": ("tests/test_graph_features.py", "tests/test_ranker.py"),
 }
 CPU_ALLOWED_SKIPS = {
@@ -101,7 +101,7 @@ def check_environment(suite: str) -> None:
         importlib.import_module("engine.resize")
         if any(name.split(".", 1)[0] in ("torch", "torch_geometric") for name in sys.modules):
             raise RuntimeError("core imports loaded an ML dependency")
-        print("Core imports succeed without Torch/PyG; no S04 solver is implemented/tested.", flush=True)
+        print("Core imports succeed without Torch/PyG; output validation and geometric repair are tested.", flush=True)
     else:
         torch = importlib.import_module("torch")
         pyg = importlib.import_module("torch_geometric")

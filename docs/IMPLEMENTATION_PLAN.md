@@ -129,7 +129,7 @@ unchanged_json = source.to_adobe()    # structurally equal to source_json
 
 # S04 (Developer 2)
 candidates: list[LayoutCandidate] = generate_candidates(source, target, config)
-report: ValidationReport = validate_candidate(source, candidate)
+report: ValidationReport = validate_candidate(source, candidate.design, target)
 
 # S03/S05 (Developer 1)
 graph = build_candidate_graph(source, candidate.design, target)
@@ -213,6 +213,15 @@ implemented full ranker foundation is documented under M4 below.
 - [ ] Demonstrate full pipeline without any model or GPU dependency.
 
 **Exit:** at least one tested sample produces reproducible validated candidates and renderable previews; extreme-case infeasibility is documented, not hidden.
+
+**Implemented output-safety subset:** `engine/candidate_validator.py` and
+`engine/layout_search.py` now gate `resize()` output and retry invalid proposals.
+See [output validation](output_validation.md). Invalid candidates never become
+selected output; exhausted search raises `NoFeasibleLayout` with diagnostics.
+The geometric repair preserves the source composition proportionally. It does
+not complete the diverse template generator, renderer checks, heuristic scorer,
+or GNN selection integration listed above. Future ranking must filter invalid
+candidates first and retry generation when the valid set is empty.
 
 ### M3 — Annotation and dataset (Developer 1 lead; Developer 2 supports)
 

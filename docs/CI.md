@@ -10,8 +10,8 @@ and newer runs cancel outdated runs for the same PR/ref.
 
 | Stable check name | Environment | Required suites |
 | --- | --- | --- |
-| `Core / Python 3.10` | Ubuntu, Python 3.10, pytest and Ruff | S02 and CI-guard tests |
-| `Core / Python 3.11` | Ubuntu, Python 3.11, pytest and Ruff | S02 and CI-guard tests |
+| `Core / Python 3.10` | Ubuntu, Python 3.10, pytest and Ruff | S02, output validation/repair, and CI-guard tests |
+| `Core / Python 3.11` | Ubuntu, Python 3.11, pytest and Ruff | S02, output validation/repair, and CI-guard tests |
 | `Graph and ML / CPU` | Ubuntu, Python 3.11, CPU Torch 2.11.0, PyG 2.8.1 | Graph/embedding and ranker tests |
 
 Jobs run independently. Core jobs have a 10-minute timeout; ML has 20 minutes.
@@ -21,7 +21,8 @@ Core installs only `requirements-dev.txt`; S02 and the baseline resize module
 use the standard library. It deliberately does not install `requirements.txt`,
 which contains rendering dependencies, or `requirements-graph.txt`. The guard
 fails if Torch/PyG are installed and imports S02 and `engine.resize` to check the
-boundary. This does not claim to test an implemented S04 generator or scorer.
+boundary. Core also tests the output gate and proportional repair; the full S04
+template generator and scorer remain deferred.
 
 ML first installs `torch==2.11.0` from the official CPU wheel index, then installs
 `requirements-dev.txt` and `requirements-graph.txt`. The installed CPU build
@@ -94,7 +95,7 @@ names, and import checks. Only E402 is exempted in the two optional ML test
 modules because imports intentionally follow `pytest.importorskip()`.
 
 ```powershell
-.\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/internal_schema.py engine/resize.py tests/test_internal_schema.py tests/test_ci.py scripts
+.\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/internal_schema.py engine/resize.py engine/candidate_validator.py engine/layout_search.py tests/test_internal_schema.py tests/test_ci.py tests/test_layout_search.py scripts
 .\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/graph_features.py engine/text_embeddings.py engine/ranker.py tests/test_graph_features.py tests/test_ranker.py
 ```
 
@@ -144,3 +145,9 @@ branch-protection check names still require an actual GitHub Actions run.
 No hosted run, commit, push, pull request, or branch-protection change is made
 by this CI setup task. Local results do not establish that a GitHub-hosted
 check has passed.
+
+After adding the output gate, local Python 3.11.17 verification ran the strict
+core suite with **172 passed** (including 41 output validation/repair tests) and
+the strict CPU ML suite with **165 passed, one allowed CUDA skip**. Core Ruff
+and `git diff --check` also passed. These are local results; a new hosted CI run
+is still required.
