@@ -1,6 +1,6 @@
 """S03 graph_v3: deterministic source/candidate graphs, not layout scores.
 
-Feature order follows docs/S03-S06_layout_engine_technical_spec.md sections 3–4.
+Feature order follows docs/S03_graph_ranker_spec.md sections 3–4.
 No Adobe data is changed, and no candidate is certified as contest-compliant.
 """
 

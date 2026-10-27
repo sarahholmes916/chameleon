@@ -120,7 +120,7 @@ Paths after S02 are **proposed** by the v0.1 technical spec; inspect the actual 
 
 ## 4. Shared APIs and handoff contracts
 
-Follow the exact S02 and S03–S06 technical specs for authoritative types and field behavior. These signatures express *the integration boundary*, not permission to implement all functions immediately.
+Follow the reference docs listed in section 8 for authoritative types and field behavior. These signatures express *the integration boundary*, not permission to implement all functions immediately.
 
 ```python
 # S02 (Developer 1 implements minimal shared foundation first)
@@ -141,21 +141,7 @@ selected: LayoutCandidate = select_best_valid_candidate(...)
 result = selected.design.to_adobe()
 ```
 
-**Contract rules:**
-
-- Each `LayoutCandidate` wraps a `Design` at the target canvas and carries a stable internal ID, layout family, generator seed, and generator version; it is **not** the Adobe output itself.
-- Maintain stable element IDs, element ordering, explicit `group_id` values, original source context, required-field handling, and unknown extension data.
-- Match elements by **exact ID**, never position or guessed roles.
-- Text candidates may change `font_size` (schema minimum 1 px) along with boxes;
-  font family, content, style runs, and other styling remain fixed. S04 must
-  search typography explicitly and pass candidate sizes to graph_v3. Its two
-  appended numeric features distinguish same-box candidates with different
-  font sizes. Renderer-aware text fitting remains separate planned work. Graph_v3 also
-  parses the supplied rgba text/fill colors and appends separate alpha features;
-  graph_v1/v2 checkpoints are incompatible and require retraining.
-- Graph tensors in S03 graph_v3 use `x_numeric[N,57]`, optional `text_vec[N,384]`, `text_mask[N,1]`, `edge_index[2,E]`, and `edge_attr[E,31]`. Feature order is locked by the technical spec; changes require versioning and tests.
-- The initial computational baseline must import **no** ML runtime dependency. `model_missing`, `model_incompatible`, and inference failures use deterministic ranking, never unvalidated GNN output.
-- A candidate failing hard constraints cannot become valid because it has a high GNN score. Explicitly handle **zero valid candidates**; never claim guaranteed feasibility on extreme targets.
+**Contract details live in the reference docs, not here:** S02 types in [internal_schema.md](internal_schema.md); graph tensors and feature versions in [graph_features.md](graph_features.md); model, checkpoints and scoring failures in [ranker.md](ranker.md); validation and retry in [output_validation.md](output_validation.md). Cross-component names (`LayoutCandidate`, selection functions) are still unresolved; see [planning/](planning/).
 
 ## 5. Dependencies and parallel work
 
@@ -200,13 +186,7 @@ Check boxes only after actual implementation and tests; unchecked items remain p
 - [x] Implement optional frozen text embeddings and graph-batch tests.
 - [x] Test tensor sizes, finite values, determinism, and a GNN forward/backward pass with *test fixtures*.
 
-Implemented in `engine/graph_features.py` and `engine/text_embeddings.py`;
-see [the graph foundation handoff](graph_features.md) for the exact API,
-dependencies, topology conventions, and test commands. The optional encoder
-interface and frozen adapter are tested with deterministic test providers;
-real pretrained weights were not downloaded or evaluated. The GATv2 exercise
-in the graph test module is a small CPU compatibility test. The subsequently
-implemented full ranker foundation is documented under M4 below.
+Implemented; see [graph_features.md](graph_features.md).
 
 **Exit:** graph tensors satisfy the versioned feature contract; the model code can run without real preference labels.
 
@@ -221,14 +201,7 @@ implemented full ranker foundation is documented under M4 below.
 
 **Exit:** at least one tested sample produces reproducible validated candidates and renderable previews; extreme-case infeasibility is documented, not hidden.
 
-**Implemented output-safety subset:** `engine/candidate_validator.py` and
-`engine/layout_search.py` now gate `resize()` output and retry invalid proposals.
-See [output validation](output_validation.md). Invalid candidates never become
-selected output; exhausted search raises `NoFeasibleLayout` with diagnostics.
-The geometric repair preserves the source composition proportionally. It does
-not complete the diverse template generator, renderer checks, heuristic scorer,
-or GNN selection integration listed above. Future ranking must filter invalid
-candidates first and retry generation when the valid set is empty.
+**Implemented subset:** the output gate and proportional repair; see [output_validation.md](output_validation.md). The template generator, renderer checks, heuristic scorer and GNN selection are not implemented.
 
 ### M3 — Annotation and dataset (Developer 1 lead; Developer 2 supports)
 
@@ -251,12 +224,7 @@ candidates first and retry generation when the valid set is empty.
 - [ ] Test validity, element preservation, extreme canvases, runtime, and end-to-end human preferences.
 - [ ] Keep diverse top-K internal/demo alternatives while official `resize(...)` returns only one design.
 
-The architecture/scoring foundation is implemented in `engine/ranker.py` with
-tests in `tests/test_ranker.py`; see [the ranker handoff](ranker.md). Test fixtures
-verify mechanics and checkpoint provenance validation only. There is no human
-preference training run, evaluated checkpoint, or production fallback integration.
-These foundation tasks can precede M3; the remaining training/evaluation tasks
-still require validated candidates, faithful previews, and human judgments.
+The architecture/scoring foundation is implemented; see [ranker.md](ranker.md). No trained checkpoint or fallback integration exists.
 
 **Exit:** reproducible end-to-end resize, actual comparison data, explicit failure/fallback tests, no unsupported visual-quality claims.
 
@@ -267,14 +235,14 @@ still require validated candidates, faithful previews, and human judgments.
 - **No duplicate models:** no alternative Adobe data classes, schema parsers, candidate identity conventions, or ad hoc feature ordering in parallel branches.
 - **PR handoff checklist:** what changed; imports/functions exposed; test command and observed result; remaining limitations; any effect on other owner's code.
 - **Honest status:** mark only tested work complete; planned architecture is not evidence of an implemented model, renderer, or contest compliance.
-- **Agent instructions:** `CLAUDE.md` should link to this file, but milestone ownership and evolving status live **here**, not duplicated across prompts.
+- **Agent instructions:** `AGENTS.md` links to this file, but milestone ownership and evolving status live **here**, not duplicated across prompts.
 
 ## 8. Document references / authority
 
 1. Official Adobe challenge rules and FAQ; Adobe v0.9 JSON Schema; existing `engine/resize.py` contract.
-2. `docs/S02_internal_design_representation.md` (or actual repository location): exact shared data representation specification.
-3. `docs/S03-S06_layout_engine_technical_spec.md` (or actual repository location): graph features, GNN ranking, candidate generation, preference training, and integration.
+2. `docs/internal_schema.md`: exact shared data representation specification.
+3. `docs/S03_graph_ranker_spec.md`, `docs/graph_features.md`, `docs/ranker.md`, `docs/output_validation.md`: implemented contracts. `docs/planning/`: S04–S06 proposals.
 4. This file: task ownership, dependencies, handoffs, and milestones.
-5. `CLAUDE.md`: coding-agent behavior and development conventions.
+5. `AGENTS.md`: coding-agent behavior and development conventions.
 
 **If anything in this plan conflicts with the official schema/rules or actual checked-in code, investigate and update the affected spec/plan before relying on it.**

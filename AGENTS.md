@@ -16,7 +16,7 @@ For any relevant change, locate and read the applicable files. Do not assume pat
 1. **Competition contract:** `RULES.md`, `FAQ.md`, `chameleon_design_schema_v0.9.json`, and any updated official instructions. These take precedence over proposals.
 2. **Current repository behavior:** `engine/resize.py`, real code, tests, input fixtures, and the installed runtime. Verify actual behavior; code may itself violate the competition contract.
 3. **S02 — Internal design representation:** authoritative *design proposal* for parsing, immutability, absence semantics, derived geometry, and round-tripping. Locate its actual path under `docs/` or elsewhere.
-4. **S03–S06 — Layout Engine Technical Specification v0.1:** design proposal for graph features, model, solver, labeling, and integration. Locate `S03-S06_layout_engine_technical_spec.md` or `Adobe_Chameleon_S03-S06_Technical_Spec_v0.1.md` if present.
+4. **S03 — Graph and ranker specification:** `docs/S03_graph_ranker_spec.md` (implemented contracts; see also `docs/graph_features.md`, `docs/ranker.md`). **S04–S06 proposals** (candidate generation, annotation/training, integration) are in `docs/planning/` and are not implemented.
 5. **Implementation plan:** Locate and read `docs/IMPLEMENTATION_PLAN.md` for developer ownership, current milestone, dependencies, and shared interfaces before changing component boundaries. Confirm that documented progress matches the actual code.
 6. This file governs agent workflow; it does **not** override official rules, the schema, or a reviewed architecture decision.
 

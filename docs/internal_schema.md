@@ -55,7 +55,7 @@ target context, plus validation, immutability, and extension cases.
 ### Integration differences to resolve in later milestones
 
 The implementation request's illustrative orchestration differs from
-[S03–S06 §1](S03-S06_layout_engine_technical_spec.md#1-modules-and-stable-boundaries):
+[S03–S06 §1](S03_graph_ranker_spec.md#1-modules-and-stable-boundaries):
 that spec declares `generate_candidates(source, target, config)` returning
 `list[LayoutCandidate]`, and its `ValidationReport` exposes `schema_ok`,
 `policy_ok`, and `geometry_ok` rather than `.is_valid`. Its §6 prose also calls

@@ -33,7 +33,7 @@ through `Design.from_adobe()` is supported even though that snapshot's own
 ## Feature contract and metadata
 
 The feature order and formulas are those of
-[S03 sections 3.3 and 4.1](S03-S06_layout_engine_technical_spec.md#33-exact-31-dimensional-edge-feature-contract).
+[S03 sections 3.3 and 4.1](S03_graph_ranker_spec.md#33-exact-31-dimensional-edge-feature-contract).
 `NODE_FEATURE_NAMES` and `EDGE_FEATURE_NAMES` list every feature in order;
 the read-only `NODE_FEATURE_INDEX` and `EDGE_FEATURE_INDEX` map names to columns.
 `FEATURE_CONTRACT_VERSION` is `"graph_v3"`.

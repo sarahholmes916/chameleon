@@ -122,47 +122,8 @@ lint scope. No existing application or model code was reformatted.
 - New skips require explicit review of the exact test and reason. Update CPU
   pins deliberately and rerun the graph/ranker suites when changing versions.
 
-## Verification boundary
+## Verification
 
-Local verification uses isolated Windows environments on Python 3.11.17.
-Observed results with pytest 9.1.1 and Ruff 0.17.3:
-
-| Command/check | Observed result |
-| --- | --- |
-| Core environment: `python -m scripts.ci_tests core` | 131 passed: 107 S02 + 24 CI-guard tests; no skips; Torch/PyG absent |
-| CPU ML environment: `python -m scripts.ci_tests ml` | 165 passed: 80 graph + 85 ranker; exactly one allowed CUDA skip |
-| ML preflight invoked in the core environment | Exit 1 for missing Torch, as required |
-| Both documented Ruff scopes | Passed |
-| `python -m pip check` in both environments | No broken requirements |
-| YAML parsing, Bash syntax, workflow paths/triggers/matrix | Passed local checks |
-
-The CPU installation was actually tested with Torch `2.11.0+cpu` and PyG `2.8.1`;
-it did not inherit the pre-existing CUDA environment. These counts describe
-this verification run and are not hardcoded acceptance conditions.
-
-Python 3.10 and Ubuntu execution, action startup, event triggering, and the
-branch-protection check names still require an actual GitHub Actions run.
-No hosted run, commit, push, pull request, or branch-protection change is made
-by this CI setup task. Local results do not establish that a GitHub-hosted
-check has passed.
-
-After adding the output gate, local Python 3.11.17 verification ran the strict
-core suite with **172 passed** (including 41 output validation/repair tests) and
-the strict CPU ML suite with **165 passed, one allowed CUDA skip**. Core Ruff
-and `git diff --check` also passed. These are local results; a new hosted CI run
-is still required.
-
-The graph_v2 typography revision is covered by the existing required graph and
-ranker modules in the CPU ML job; no new job or skip exception is needed. Local
-Python 3.11.17 verification: **175 ML tests passed** (87 graph, 88 ranker), with
-one allowed CUDA skip; **172 core tests passed**. New regressions cover font-only
-candidate differences, ID-based matching, extreme sizes, model input gradients,
-and incompatible old tensors/checkpoints. ML Ruff and diff checks passed.
-This does not establish a hosted CI result or trained ranking quality.
-
-The graph_v3 color revision also runs in those existing required modules. Local
-verification: **231 ML tests passed** (138 graph, 93 ranker), with one allowed
-CUDA skip; **172 core tests passed**. The added cases load colors from all three
-Adobe JSON fixtures and cover RGB/alpha/masks, unsupported colors, source
-preservation, and graph_v2 checkpoint rejection. Ruff and diff checks passed;
-README.md was unchanged. Hosted CI has not been run for this revision.
+Local runs are not hosted-CI results. Hosted execution (Python 3.10, Ubuntu, action startup, triggers,
+branch-protection names) must be confirmed from an actual GitHub Actions run. Test counts are
+not recorded here; run `python -m scripts.ci_tests core` and `python -m scripts.ci_tests ml`.
