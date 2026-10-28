@@ -12,7 +12,7 @@ import pytest
 
 
 SUITES = {
-    "core": ("tests/test_internal_schema.py", "tests/test_ci.py", "tests/test_layout_search.py"),
+    "core": ("tests/test_internal_schema.py", "tests/test_ci.py", "tests/test_layout_search.py", "tests/test_layout_units.py"),
     "ml": ("tests/test_graph_features.py", "tests/test_ranker.py"),
 }
 CPU_ALLOWED_SKIPS = {
