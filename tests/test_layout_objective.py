@@ -5,6 +5,7 @@ import json
 import logging
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,7 @@ from engine.layout_objective import (
     ObjectiveWeights,
     TermScores,
     evaluate_objective,
+    score_deterministic,
 )
 from engine.layout_search import baseline_proposal
 from engine.layout_units import (
@@ -134,8 +136,9 @@ def test_no_ml_dependencies_by_ast():
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             modules.add(node.module)
     assert modules <= {
-        "__future__", "logging", "math", "dataclasses",
-        "engine.internal_schema", "engine.layout_units", "engine.text_fit",
+        "__future__", "logging", "math", "collections.abc", "dataclasses",
+        "typing", "engine.internal_schema", "engine.layout_units",
+        "engine.text_fit",
     }
 
 
@@ -683,6 +686,133 @@ def test_inputs_are_not_mutated():
     before = (source.to_adobe(), moved.to_adobe(), target.to_adobe())
     evaluate_objective(source, moved, target)
     assert (source.to_adobe(), moved.to_adobe(), target.to_adobe()) == before
+
+
+def test_score_returns_one_float_per_candidate_in_input_order():
+    source = design(1000, 1000, [
+        shape("a", 100, 100, 100, 100),
+        shape("b", 300, 300, 100, 100),
+    ])
+    kept = design(1000, 1000, [
+        shape("a", 100, 100, 100, 100),
+        shape("b", 300, 300, 100, 100),
+    ])
+    scattered = design(1000, 1000, [
+        shape("a", 800, 800, 100, 100),
+        shape("b", 0, 0, 100, 100),
+    ])
+    target = target_canvas(1000, 1000)
+    forward = score_deterministic(source, [kept, scattered], target)
+    assert len(forward) == 2
+    assert all(type(value) is float and math.isfinite(value) for value in forward)
+    assert forward[0] != forward[1]
+    backward = score_deterministic(source, [scattered, kept], target)
+    assert backward == [forward[1], forward[0]]
+
+
+def test_score_higher_is_better():
+    source = design(1000, 1000, [
+        shape("a", 100, 100, 100, 100),
+        shape("b", 300, 300, 100, 100),
+    ])
+    kept = design(1000, 1000, [
+        shape("a", 100, 100, 100, 100),
+        shape("b", 300, 300, 100, 100),
+    ])
+    scattered = design(1000, 1000, [
+        shape("a", 800, 800, 100, 100),
+        shape("b", 0, 0, 100, 100),
+    ])
+    target = target_canvas(1000, 1000)
+    good, bad = score_deterministic(source, [kept, scattered], target)
+    assert good > bad
+
+
+def test_score_maps_from_objective_total():
+    source = design(100, 100, [shape("a", 0, 0, 10, 10)])
+    moved = design(100, 100, [shape("a", 10, 0, 10, 10)])
+    target = target_canvas(100, 100)
+    total = evaluate_objective(source, moved, target).total
+    assert score_deterministic(source, [moved], target) == [pytest.approx(1.0 - total)]
+    move_only = ObjectiveWeights(
+        move=1.0, align=0.0, pair=0.0, scale=0.0, unwanted_overlap=0.0,
+        balance=0.0, read=0.0, group=0.0, space=0.0,
+    )
+    single = evaluate_objective(source, moved, target, weights=move_only)
+    assert score_deterministic(source, [moved], target, weights=move_only) == [
+        pytest.approx(1.0 - single.terms.move)]
+
+
+def test_score_empty_list_returns_empty():
+    source = design(100, 100, [shape("a", 0, 0, 10, 10)])
+    assert score_deterministic(source, [], target_canvas(100, 100)) == []
+
+
+@pytest.mark.parametrize("candidate", ["missing", "renamed", "retyped"])
+def test_score_malformed_input_raises(candidate):
+    source = design(1000, 1000, [
+        shape("a", 0, 0, 100, 100),
+        shape("b", 200, 0, 100, 100),
+    ])
+    if candidate == "missing":
+        broken = design(1000, 1000, [shape("a", 0, 0, 100, 100)])
+    elif candidate == "renamed":
+        broken = design(1000, 1000, [
+            shape("a", 0, 0, 100, 100),
+            shape("zzz", 200, 0, 100, 100),
+        ])
+    else:
+        broken = design(1000, 1000, [
+            shape("a", 0, 0, 100, 100),
+            text("b", 200, 0, 100, 100, content="hi", font_size=16),
+        ])
+    with pytest.raises(ValueError):
+        score_deterministic(source, [broken], target_canvas(1000, 1000))
+
+
+def test_score_never_returns_a_partial_list():
+    source = design(1000, 1000, [
+        shape("a", 0, 0, 100, 100),
+        shape("b", 200, 0, 100, 100),
+    ])
+    good = design(1000, 1000, [
+        shape("a", 0, 0, 100, 100),
+        shape("b", 200, 0, 100, 100),
+    ])
+    bad = design(1000, 1000, [shape("a", 0, 0, 100, 100)])
+    with pytest.raises(ValueError, match="ids do not match"):
+        score_deterministic(source, [good, bad], target_canvas(1000, 1000))
+
+
+def test_score_accepts_wrappers_exposing_design():
+    source = design(1000, 1000, [
+        shape("a", 0, 0, 100, 100),
+        shape("b", 200, 0, 100, 100),
+    ])
+    moved = design(1000, 1000, [
+        shape("a", 50, 0, 100, 100),
+        shape("b", 200, 0, 100, 100),
+    ])
+    target = target_canvas(1000, 1000)
+    wrapped = SimpleNamespace(design=moved)
+    assert score_deterministic(source, [wrapped], target) == \
+        score_deterministic(source, [moved], target)
+
+
+def test_score_is_deterministic():
+    source = design(1000, 1000, [
+        shape("a", 100, 100, 100, 100, group_id="g"),
+        shape("b", 300, 300, 100, 100, group_id="g"),
+        text("t", 100, 500, 200, 60, content="hello", font_size=14),
+    ])
+    moved = design(800, 1200, [
+        shape("a", 80, 120, 90, 110, group_id="g"),
+        shape("b", 260, 360, 90, 110, group_id="g"),
+        text("t", 90, 600, 180, 70, content="hello", font_size=12),
+    ])
+    target = target_canvas(800, 1200)
+    assert score_deterministic(source, [moved], target) == \
+        score_deterministic(source, [moved], target)
 
 
 @pytest.mark.parametrize("name", SAMPLES)

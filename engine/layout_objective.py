@@ -40,7 +40,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from engine.internal_schema import Canvas, Design, Element
 from engine.layout_units import (
@@ -59,6 +61,7 @@ __all__ = [
     "ALIGN_DEVIATION_SCALE",
     "ALIGN_SOURCE_TOLERANCE",
     "BALANCE_AREA_CAP_FRACTION",
+    "CandidateWithDesign",
     "GROUP_COMPACTNESS_RANGE",
     "OBJECTIVE_VERSION",
     "PAIR_DISTANCE_SCALE",
@@ -83,6 +86,7 @@ __all__ = [
     "ObjectiveWeights",
     "TermScores",
     "evaluate_objective",
+    "score_deterministic",
 ]
 
 _logger = logging.getLogger(__name__)
@@ -181,6 +185,18 @@ class ObjectiveScore:
     objective_version: str
 
 
+class CandidateWithDesign(Protocol):
+    """A candidate wrapper exposing its layout as `.design`.
+
+    Structural mirror of the Protocol of the same name in
+    engine.ranker (deliberately not imported: that module requires
+    ML frameworks, which the baseline path must not need).
+    """
+
+    @property
+    def design(self) -> Design: ...
+
+
 def evaluate_objective(
     source: Design,
     candidate: Design,
@@ -226,6 +242,32 @@ def evaluate_objective(
     )
     return ObjectiveScore(terms=terms, total=total, weights=active,
                           objective_version=OBJECTIVE_VERSION)
+
+
+def score_deterministic(
+    source: Design,
+    candidates: Sequence[Design | CandidateWithDesign],
+    target: Canvas,
+    *,
+    weights: ObjectiveWeights | None = None,
+) -> list[float]:
+    """Score validated candidates without any learned model; higher is better.
+
+    Each score is 1.0 - J(L) (spec §6.2 says only "higher is better"; this
+    mapping keeps scores in [0, 1] whenever the total is). Scores come back
+    in input order with no sorting, repair, or fallback. An empty candidate
+    list returns []. A malformed candidate (IDs not matching the source, or
+    a changed element type) raises ValueError and no partial list is ever
+    returned. Pure and deterministic.
+    """
+    if not candidates:
+        return []
+    scores = []
+    for candidate in candidates:
+        design = candidate if isinstance(candidate, Design) else candidate.design
+        total = evaluate_objective(source, design, target, weights=weights).total
+        scores.append(1.0 - total)
+    return scores
 
 
 def _match_by_id(
