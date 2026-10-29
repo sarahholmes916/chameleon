@@ -3,8 +3,8 @@
 Tiered grouping over an immutable S02 Design: explicit groups default to one
 cohesive unit, background-like elements stand alone, and remaining elements
 form soft clusters only over strong association edges. Units preserve member
-relative geometry for later slot assignment. See S04 sections 6.1 and 6.2a in
-docs/planning/S04_candidate_generation.md.
+relative geometry for later slot assignment. See D.1.1 and D.1.3 in
+docs/reference/D_candidate_generation.md.
 
 Deviations from that proposal, per Developer 2 rulings:
 - Explicit groups are their own tier and stay cohesive regardless of the
