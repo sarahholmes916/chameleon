@@ -5,8 +5,9 @@ change. The literal sets below are a deliberately independent copy used only by 
 drift of the production allowlist, or any generator that edits a protected field, fails here.
 
 Implemented candidate families: the proportional baseline (`baseline_proposal`: attempt 0 is the
-stretch, attempts 1+ fit the composition uniformly). Planned families (VERTICAL_STACK, HORIZONTAL_FLOW,
-TWO_COLUMN, HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY; Appendix D.1.2) have no code, so their property
+stretch, attempts 1+ fit the composition uniformly) plus HORIZONTAL_FLOW and VERTICAL_STACK
+(one candidate per group mode, all fully valid). Planned families (TWO_COLUMN,
+HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY; Appendix D.1.2) have no code, so their property
 tests are deferred: register each one in FAMILIES below when it is implemented. No placeholder family
 or skipped test stands in for them.
 """
@@ -18,10 +19,15 @@ from pathlib import Path
 import pytest
 
 from engine import candidate_validator, layout_edits
+from engine.candidate_generator import (
+    horizontal_flow_candidates,
+    vertical_stack_candidates,
+)
 from engine.candidate_validator import mutable_fields, validate_candidate
 from engine.internal_schema import Canvas, Design
 from engine.layout_edits import ProtectedFieldError, layout_edit
 from engine.layout_search import NoFeasibleLayout, baseline_proposal, find_valid_layout
+from engine.layout_units import required_group_modes
 from engine.resize import resize
 
 
@@ -193,7 +199,24 @@ def baseline_candidates(source, target):
     return [(f"attempt{n}", baseline_proposal(source, target, n), n > 0) for n in range(8)]
 
 
-FAMILIES = {"baseline": baseline_candidates}
+def flow_candidates(source, target):
+    # (label, candidate, must_be_fully_valid), one entry per group mode.
+    candidates = horizontal_flow_candidates(source, target)
+    modes = required_group_modes(source)
+    assert len(candidates) == len(modes)
+    return [(mode, candidate, True) for mode, candidate in zip(modes, candidates)]
+
+
+def stack_candidates(source, target):
+    candidates = vertical_stack_candidates(source, target)
+    modes = required_group_modes(source)
+    assert len(candidates) == len(modes)
+    return [(mode, candidate, True) for mode, candidate in zip(modes, candidates)]
+
+
+FAMILIES = {"baseline": baseline_candidates,
+            "horizontal_flow": flow_candidates,
+            "vertical_stack": stack_candidates}
 
 
 @pytest.mark.parametrize("family", sorted(FAMILIES))

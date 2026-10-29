@@ -6,10 +6,62 @@ the Dockerfile) is plumbing so you can focus on exactly one function:
 `resize()`. See RULES.md and the design schema for the full contract.
 """
 
+import logging
+from collections.abc import Sequence
 from typing import Any
 
+from engine.candidate_generator import (
+    FAMILY_HORIZONTAL_FLOW,
+    FAMILY_SCALE_BASELINE,
+    FAMILY_VERTICAL_STACK,
+    baseline_candidate,
+    horizontal_flow_candidates,
+    vertical_stack_candidates,
+)
+from engine.candidate_validator import validate_candidate
 from engine.internal_schema import Canvas, Design
+from engine.layout_objective import score_deterministic
 from engine.layout_search import baseline_proposal, find_valid_layout
+
+_logger = logging.getLogger(__name__)
+
+# Tie-break order after score: the baseline floor first, so the designed
+# families override legacy-feasible output only when strictly better.
+_FAMILY_RANK = {
+    FAMILY_SCALE_BASELINE: 0,
+    FAMILY_HORIZONTAL_FLOW: 1,
+    FAMILY_VERTICAL_STACK: 2,
+}
+
+
+def _best_index(scores: Sequence[float], family_ranks: Sequence[int]) -> int:
+    """Position of the winning candidate: higher score, family rank, order."""
+    return min(range(len(scores)),
+               key=lambda here: (-scores[here], family_ranks[here], here))
+
+
+def _select_batch_candidate(design: Design, target: Canvas) -> dict[str, Any] | None:
+    """Best validated batch candidate, or None when the batch yields nothing."""
+    batches = (
+        (FAMILY_SCALE_BASELINE, [baseline_candidate(design, target)]),
+        (FAMILY_HORIZONTAL_FLOW, horizontal_flow_candidates(design, target)),
+        (FAMILY_VERTICAL_STACK, vertical_stack_candidates(design, target)),
+    )
+    shortlisted: list[tuple[int, int, dict[str, Any]]] = []
+    for family, candidates in batches:
+        for position, candidate in enumerate(candidates):
+            report = validate_candidate(design, candidate, target)
+            if report.is_valid:
+                shortlisted.append((_FAMILY_RANK[family], position, candidate))
+            else:
+                _logger.debug("dropping %s[%d]: %s",
+                              family, position, "; ".join(report.violations))
+    if not shortlisted:
+        return None
+    designs = [Design.from_adobe(candidate) for _, _, candidate in shortlisted]
+    scores = score_deterministic(design, designs, target)
+    ranks = [rank for rank, _, _ in shortlisted]
+    return shortlisted[_best_index(scores, ranks)][2]
 
 
 def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, Any]:
@@ -52,6 +104,13 @@ def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, A
     # The output boundary never returns an invalid best-effort draft.
     design = Design.from_adobe(source, target_canvas=target_canvas)
     target = Canvas.from_adobe(target_canvas)
+    try:
+        selected = _select_batch_candidate(design, target)
+    except Exception:
+        _logger.debug("batch selection failed; using legacy repair", exc_info=True)
+        selected = None
+    if selected is not None:
+        return selected
     return find_valid_layout(
         design, target,
         lambda attempt, previous_report: baseline_proposal(design, target, attempt),

@@ -48,7 +48,7 @@ jobs:
                     engine/internal_schema.py engine/resize.py engine/candidate_validator.py engine/layout_search.py
                     engine/layout_edits.py engine/layout_units.py engine/layout_objective.py engine/candidate_generator.py
                     tests/test_internal_schema.py tests/test_ci.py tests/test_layout_search.py
-                    tests/test_layout_edits.py tests/test_layout_units.py tests/test_layout_objective.py tests/test_candidate_generator.py scripts
+                    tests/test_layout_edits.py tests/test_layout_units.py tests/test_layout_objective.py tests/test_candidate_generator.py tests/test_resize.py scripts
       - name: Run required core suites without ML dependencies
         run: python -m scripts.ci_tests core
 
