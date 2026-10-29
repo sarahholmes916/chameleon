@@ -1,248 +1,169 @@
-# Adobe Chameleon — Implementation Plan & Responsibilities
+# Adobe Chameleon — Implementation Plan
 
-**Status:** Working plan; checked items reflect verified implementation
+This document covers **ownership, dependencies, milestones and progress only**. Architecture, interfaces,
+constraints and component status are defined in [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md); this plan defines
+none of them. A checked box means the item exists in the repository and a test module covers it (verified
+by inspection when the box was updated); it is not a test result and not proof of contest compliance.
 
-**Version:** 0.1  
-**Updated:** 2026-10-26  
-**Location:** `docs/IMPLEMENTATION_PLAN.md`
+## 1. Developer ownership
 
-> **Purpose:** Define who owns each part of the hybrid Adobe Chameleon resize engine, how the parts connect, and which work can begin independently. This is a coordination document, **not** a replacement for the technical specifications or proof that any module exists.
+### Developer 1 — ML, data and GNN
 
-## 1. Project goal and shared architecture
+**Temporary exception:** implements the minimal shared S02 representation while Developer 2 is unavailable.
+This is not a second independently developed schema.
 
-Given a source Adobe design JSON and a requested target canvas, produce a resized design that respects the competition's actual rules. The engine should produce several internally valid, visually different candidate layouts, select the best for the official single-output `resize(...)` contract, and optionally expose multiple choices through a separate demo/UI.
+After S02, primary ownership:
 
-```text
-Adobe source JSON + target_canvas
-              |
-              v
-     S02 shared representation
-       (Canvas/Element/Design)
-              |
-      +-------+----------------------------+
-      |                                    |
-      v                                    v
- S04 deterministic                   S03 graph features
- source analysis / layout            + optional embeddings
- generation / validation                    |
-      |                                     v
-      |                               GNN layout ranker
-      v                                     ^
- Valid LayoutCandidate objects -------------+
-      |                                     |
-      +---------------------+---------------+
-                            v
-                 rank valid candidates
-           GNN if verified/available;
-           otherwise deterministic scorer
-                            |
-                            v
-              diversify internal choices
-                            |
-                            v
-             selected compliant Adobe JSON
-                 (canvas + elements)
-```
+- **S03 graph construction:** node/edge features, optional frozen text embeddings, batching, missingness handling, tensor-shape tests.
+- **S03/S05 ranker:** PyTorch Geometric GATv2 whole-layout scorer.
+- **S05 data:** synthetic source designs and fixtures; dataset identifiers, splits, manifests, version metadata.
+- **S05 annotation UI:** side-by-side comparison of validated, accurately rendered candidates (A/B/tie/both-bad, optional reasons, randomized placement, persisted records).
+- **S05 training/evaluation:** pairwise labels, simple ranking baselines, then the GNN; source-design-disjoint holdout; comparison with the deterministic ranker; evaluation of the `graph_v3` ranker on font-size-differing candidate pairs before any graph change (spec B.7.3).
+- **S05 ranking wrapper:** `rank_candidates` (spec §6.4): learned scoring with the deterministic fallback, the exception-to-fallback mapping and its tests. It calls Developer 2's `score_deterministic` and does not reimplement it.
+- **Later experiments:** model-guided search/relationship prediction only after the basic ranker and computational pipeline are working and measurable.
 
-**Non-negotiable architectural boundaries:**
+Does **not** own by default: candidate geometry solver, deterministic scoring, full target-layout validation, preview renderer, or the production `resize.py` adapter. Use their public interfaces.
 
-- S02 is the shared source of truth for Adobe element and canvas data; neither developer creates another competing parser or `Element`/`Design` class.
-- **The computational engine is permanent.** It generates candidates, checks constraints, supplies heuristic ranking, and runs without an ML checkpoint. The GNN does **not** replace geometric validity checks.
-- **Initially, the GNN ranks full candidates, not individual objects.** It uses one graph per `(source, candidate, target)` with nodes for original elements and relational edges; attention coefficients are *not* element-importance scores.
-- Human side-by-side preferences are training labels for quality ranking. Do not use computational heuristic scores as synthetic *preference* ground truth.
-- All original required elements and immutable stage-one fields must be preserved according to authoritative Adobe rules. Internal graph metadata, grouping hypotheses, ranking scores, and UI data never appear in official Adobe output.
-- The final competition-facing function returns **one** `{"canvas": ..., "elements": [...]}` design unless the official interface changes. Multiple options remain internal/demo functionality.
+### Developer 2 — Computational layout and renderer
 
-## 2. Developer ownership
+Begins when available, building on Developer 1's S02 foundation.
 
-### Developer 1 — ML, data, and GNN (you)
+- Remaining **S02** controlled updates (`with_updates`, `with_layout`).
+- **S04** source analysis, layout units, candidate generation and repair, validation extensions, deterministic scoring (implements and maintains `score_deterministic`, which `rank_candidates` uses as primary scorer and fallback, and its calibration, D.1.5–D.1.6), option diversification.
+- **Rendering/preview:** faithful rendering for debugging and human comparison, or documented renderer limits agreed with Developer 1 before labeling.
+- **S06 integration:** the thin competition-facing adapter in `engine/resize.py`.
 
-**Immediate responsibility:** implement the minimal, reliable **S02 shared representation** because Developer 2 is currently unavailable. This is a temporary ownership exception, not a second independently developed schema.
-
-**After the S02 milestone, primary ownership:**
-
-- **S03 graph construction:** node features, directed edge features, optional frozen text embeddings, batching, feature/missingness handling, and tensor-shape tests.
-- **S03/S05 ranker:** build and train a PyTorch Geometric GNN (initial design: edge-aware GATv2), producing a scalar **whole-layout** quality score conditioned on source and target.
-- **S05 data:** generate synthetic *source* designs and experimental layout fixtures; maintain dataset identifiers, splits, manifests, and version metadata.
-- **S05 annotation UI:** build side-by-side comparisons of **validated, accurately rendered candidate layouts**, supporting A/B/tie/both-bad and optional reasons. Randomize screen placement and persist annotations.
-- **S05 training/evaluation:** collect manual pairwise rankings; train simple ranking baselines then the GNN; evaluate on **source-design-disjoint** holdout sets and compare against deterministic ranking.
-- **Later experiments:** model-guided search/relationship prediction **only after** the basic ranker and computational pipeline are working and measurable.
-
-**Do not own by default:** candidate geometry solver, deterministic scoring, full target-layout validation, final preview renderer, or the production `resize.py` adapter. Use their public interfaces rather than implementing competing versions.
-
-### Developer 2 — Computational layout and renderer (teammate)
-
-**Begins when available, building on Developer 1's committed S02 foundation.**
-
-**Primary ownership:**
-
-- Finish remaining **S02** controlled updates, `with_layout`, and stage-one comparison/validation interfaces as needed by S04; preserve the original S02 contracts.
-- **S04 source analysis:** grouping heuristics, layout-unit construction, background/foreground and deliberate-overlap evidence, layout-family eligibility.
-- **S04 candidate generation:** deterministic proportional baseline, horizontal/vertical/compact/hero-style layouts, feasible region assignment, geometry optimization and repair.
-- **S04 validation:** enforce authoritative schema/policy and applicable geometric constraints, report violations explicitly, and reject invalid candidates before aesthetic ranking.
-- **S04 fallback scoring:** deterministic layout-quality metrics independent of PyTorch, text encoders, or trained checkpoints.
-- **Rendering/preview pipeline:** faithfully render candidate JSON for debugging and human comparisons, or document renderer limits and coordinate with Developer 1 before labeling.
-- **Option diversification:** remove near-duplicates and retain meaningfully different strong alternatives.
-- **S06 integration:** own the thin competition-facing adapter in `engine/resize.py`, keeping the official response structure and fallback behavior.
-
-**Do not own by default:** graph tensor definitions, GNN architecture, human-label training data, annotation UI, or training checkpoints.
+Does **not** own by default: graph tensor definitions, GNN architecture, human-label data, annotation UI, training checkpoints.
 
 ### Shared responsibilities
 
-- Verify contest constraints against the **actual** `RULES.md`, `FAQ.md`, v0.9 schema, samples, and existing `engine/resize.py`. Specifications are proposals where these have not been checked.
-- Agree on and test shared interfaces; coordinate interface changes *before* either branch relies on them.
-- Review each other's pull requests for contract compatibility and regressions.
-- Integration, end-to-end tests, demo design, runtime measurement, and held-out human evaluation.
-- Independently label a subset of candidates (if possible) to estimate annotation consistency.
+- Verify contest constraints against the actual official files; coordinate interface changes in a PR (spec and tests updated in the same change) before either branch relies on them.
+- **Scoring interface.** `score_candidates` (Developer 1), `score_deterministic` (Developer 2) and `rank_candidates` (Developer 1) are one coordinated interface: a change to any of their signatures, to the fallback mapping or to `objective_version` is made in a PR that updates the spec and tests and is reviewed by both developers.
+- Cross-review pull requests for contract compatibility; integration and end-to-end tests; runtime measurement; held-out human evaluation.
+- Independently label a subset of candidates to estimate annotation consistency.
 
-## 3. Ownership by component
+## 2. Ownership by component
 
-| Component / file (proposed path) | Primary owner | Collaborator / consumer | Deliverable |
-|---|---|---|---|
-| `engine/internal_schema.py` (S02 core) | Developer 1 **now** | Developer 2 later | Typed, lossless design representation and source round-trip tests |
-| S02 controlled updates/layout installation | Developer 2 **later** | Developer 1 | Immutable candidate creation and stage-one checks |
-| `engine/graph_features.py` | Developer 1 | Developer 2 uses indirectly | Versioned source/candidate graph tensors |
-| `engine/text_embeddings.py` | Developer 1 | — | Optional frozen NLP embeddings and cache |
-| `engine/ranker.py` | Developer 1 | Developer 2 uses scoring API | Whole-candidate GNN scorer |
-| `engine/layout_units.py` | Developer 2 | Developer 1 uses through candidate data | Internal grouping/layout units |
-| `engine/candidate_generator.py` | Developer 2 | Developer 1 consumes candidates | Diverse computational candidate layouts |
-| `engine/layout_objective.py` | Developer 2 | — | Reproducible soft objectives |
-| `engine/candidate_validator.py` | Developer 2 | Developer 1 consumes validity reports | Hard-constraint and geometry checks |
-| Deterministic scorer / `engine/diversify.py` | Developer 2 | Developer 1 compares against it | Fallback ranking and diverse option selection |
-| Rendering/preview adapter (path TBD) | Developer 2 | Developer 1 requires for annotation | Accurate source/candidate previews |
-| `annotation/app.py`, `annotation/records.py` | Developer 1 | Developer 2 may label | Preference UI and durable records |
-| `training/dataset.py`, `training/train_ranker.py` | Developer 1 | — | Grouped datasets, training, model artifacts |
-| `training/evaluate.py` | Developer 1 | Developer 2 validates output metrics | Baselines, ablations, preference accuracy |
-| `engine/resize.py` | Developer 2 | Developer 1 reviews integration | Single-design competition output and fallback |
-| `tests/` and docs | Each owner for their modules | Both cross-review | Tests and updated contracts |
+Paths marked *Planned* do not exist; confirm against the checkout before relying on them.
 
-Paths after S02 are **proposed** by the v0.1 technical spec; inspect the actual repository before adding or moving files.
+| Component / file | Primary owner | Consumer | Status |
+| --- | --- | --- | --- |
+| `engine/internal_schema.py` (S02) | Developer 1 now; extensions Developer 2 | all | Implemented |
+| S02 `with_updates` / `with_layout` | Developer 2 | Developer 1 | Planned |
+| `engine/graph_features.py`, `engine/text_embeddings.py` | Developer 1 | ranker | Implemented |
+| `engine/ranker.py` | Developer 1 | integration | Implemented (untrained) |
+| `engine/candidate_validator.py`, `engine/layout_search.py` | Developer 2 | all | Implemented (output gate, proportional repair) |
+| `engine/candidate_generator.py`, `engine/layout_units.py`, `engine/layout_objective.py`, `engine/diversify.py` | Developer 2 | Developer 1 | Planned |
+| Deterministic scorer (`score_deterministic`, D.1.5) and its calibration (D.1.6) | Developer 2 implements and maintains | Developer 1 (`rank_candidates`, baseline comparison) | Planned (location undecided) |
+| Learned-then-deterministic ranking wrapper (`rank_candidates`, spec §6.4) | Developer 1; calls Developer 2's `score_deterministic` through its public interface | Developer 2 (selection, `resize`) | Planned |
+| `renderer/converter/` | Developer 2 | Developer 1 (labeling) | Vendored; fidelity unverified |
+| `annotation/app.py`, `annotation/records.py` | Developer 1 | Developer 2 may label | Planned |
+| `training/dataset.py`, `training/train_ranker.py`, `training/evaluate.py` | Developer 1 | Developer 2 validates metrics | Planned |
+| `engine/resize.py` | Developer 2 | Developer 1 reviews | Partial |
+| `tests/`, docs | each owner | both review | — |
 
-## 4. Shared APIs and handoff contracts
+## 3. Dependencies and parallel work
 
-Follow the reference docs listed in section 8 for authoritative types and field behavior. These signatures express *the integration boundary*, not permission to implement all functions immediately.
-
-```python
-# S02 (Developer 1 implements minimal shared foundation first)
-source = Design.from_adobe(source_json, target_canvas=target_canvas_json)
-unchanged_json = source.to_adobe()    # structurally equal to source_json
-
-# S04 (Developer 2)
-candidates: list[LayoutCandidate] = generate_candidates(source, target, config)
-report: ValidationReport = validate_candidate(source, candidate.design, target)
-
-# S03/S05 (Developer 1)
-graph = build_candidate_graph(source, candidate.design, target)
-scores: list[float] = score_candidates(source, valid_candidates, target)
-
-# S04/S06 (Developer 2 + shared integration)
-# If ranker is unavailable, use deterministic scores; revalidate before output.
-selected: LayoutCandidate = select_best_valid_candidate(...)
-result = selected.design.to_adobe()
-```
-
-**Contract details live in the reference docs, not here:** S02 types in [internal_schema.md](internal_schema.md); graph tensors and feature versions in [graph_features.md](graph_features.md); model, checkpoints and scoring failures in [ranker.md](ranker.md); validation and retry in [output_validation.md](output_validation.md). Cross-component names (`LayoutCandidate`, selection functions) are still unresolved; see [planning/](planning/).
-
-## 5. Dependencies and parallel work
-
-| Developer 1 task | Needs Developer 2 output first? | How to proceed in the meantime |
-|---|---|---|
-| Implement minimal S02 parser/classes/serializer | **No** | Start now using authoritative schema and fixtures |
-| Build node/edge feature extraction | **No**, after S02 interface works | Use real source designs; create test fixtures for candidate geometry |
-| Build GNN and test forward/backprop | **No** | Use synthetic/mock candidate objects solely to verify tensors/training mechanics |
-| Build annotation UI shell and data record format | **No** | Use placeholders for UI behavior; do **not** claim labels reflect real visuals |
-| Generate varied synthetic *source* designs | **No** | Focus on coherent design grammars and parser stress tests |
-| Collect trustworthy **aesthetic** pairwise labels | **Yes**, for validated candidates and reliable previews | Wait for generator + renderer; don't label known-invalid or unfaithfully rendered candidates as ordinary design-quality examples |
-| Train/evaluate final candidate ranker | **Yes**, for human labels and held-out candidate sets | Prepare loss, batching, experiment configs, and a simple model baseline |
+| Developer 1 task | Needs Developer 2 output first? | Meanwhile |
+| --- | --- | --- |
+| S02 parser/serializer | No | Done |
+| Node/edge feature extraction | No | Done (real sources; candidate fixtures) |
+| GNN forward/backward | No | Done with synthetic/mock candidates for mechanics only |
+| Annotation UI shell and record format | No | Placeholders; do not claim labels reflect real visuals |
+| Synthetic source designs | No | Coherent design grammars and parser stress tests |
+| Trustworthy aesthetic pairwise labels | **Yes** — validated candidates and reliable previews | Do not label known-invalid or unfaithfully rendered candidates as ordinary design-quality examples |
+| Train/evaluate the final ranker | **Yes** — human labels and held-out candidate sets | Loss, batching, configs, simple baseline |
 | End-to-end baseline-vs-GNN comparison | **Yes** | Agree on metric and holdout protocol now |
 
-**Shared blocking handoffs:**
+**Blocking handoffs**
 
-1. **Developer 1 → Developer 2:** stable `Canvas`, `Element`, `StyleRun`, `Design`, `ABSENT`, parsing/serialization tests, module import path, and documented deferred S02 features.
-2. **Developer 2 → Developer 1:** functioning `generate_candidates()`, `validate_candidate()`, reproducible `candidate_id`/versions, verified renderer and fixed preview API.
-3. **Developer 1 → Developer 2:** compatible ranker checkpoint/scoring interface, graph/encoder version manifest, fallback exception behavior, and evaluation summary.
-4. **Both → integration:** consistent `LayoutCandidate` and `ValidationReport`, known validation behavior, candidate diversity, single official output, and documented failure cases.
+1. Developer 1 → 2: stable S02 types, import path, tests, and documented deferred S02 features. *(done)*
+2. Developer 2 → 1: a working `score_deterministic` (provisional weights, [spec D.1.5](reference/D_candidate_generation.md#d15-soft-objective-fully-defined-enough-to-implement)) so that `rank_candidates` can use it, and a working `generate_candidates` (recommended contract, awaiting approval: [spec §5.4](TECHNICAL_SPEC.md#54-planned-generator--validator--repair-integration-contract-u2)), reproducible candidate identity/versions, verified renderer and fixed preview API.
+3. Developer 1 → 2: compatible ranker checkpoint, graph/encoder version manifest, `rank_candidates` with its fallback behavior (recommended contract, awaiting approval: [spec §6.4](TECHNICAL_SPEC.md#64-fallback-policy)), evaluation summary.
+4. Both → integration: consistent `LayoutCandidate`, `ValidationReport`, known validation behavior, candidate diversity, single official output, documented failure cases.
 
-## 6. Milestones and acceptance criteria
+## 4. Milestones
 
-Check boxes only after actual implementation and tests; unchecked items remain planned.
+This is the only milestone numbering in the repository.
 
 ### M1 — Shared S02 foundation (Developer 1)
 
-- [ ] Locate and verify original schema, rules, samples, and existing source files.
-- [ ] Implement core typed representation and `ABSENT` handling in `engine/internal_schema.py`.
-- [ ] Implement lossless parsing/serialization, stable ID lookup, original groups, and derived geometry.
-- [ ] Pass structural round-trip tests on all three source fixtures, with and without target canvas context.
-- [ ] Test explicit null vs absent, nested extras, numeric preservation, missing assets, immutable source, and invalid input paths.
-- [ ] Commit and document exact public API; list deferred controlled-edit APIs for teammate.
+- [x] Locate and verify the schema, rules, samples and existing source files.
+- [x] Typed representation and `ABSENT` handling in `engine/internal_schema.py`.
+- [x] Lossless parsing/serialization, ID lookup, original groups, derived geometry.
+- [x] Round-trip tests on all three fixtures, with and without target context.
+- [x] Tests for null vs absent, nested extras, numeric preservation, missing assets, immutability, invalid input.
+- [x] Public API documented ([Appendix A](reference/A_internal_representation.md)); deferred controlled-edit APIs listed.
 
-**Exit:** graph code can import `Design` and iterate source elements; teammate can extend S02 without rewriting it. **Do not implement S04 as part of this milestone.**
+### M2A — Graph foundation (Developer 1)
 
-### M2A — Graph foundation (Developer 1; after minimal S02)
+- [x] Node and edge features, missing-value masks.
+- [x] Dense edges up to 64 elements and the deterministic sparse rule beyond; one graph per design/candidate/target.
+- [x] Exact-ID matching.
+- [x] Optional frozen text embeddings and graph-batch tests.
+- [x] Tensor sizes, finiteness, determinism, GNN forward/backward on fixtures.
+- [x] Candidate font size, text/fill color and alpha features (`graph_v3`).
+- [x] `graph_v4` typography features (text-fit node feature, size-order edge feature) and `gatv2_ranker_v4`, opt-in alongside the unchanged default `graph_v3` ([spec B.7.2](reference/B_graph_features.md#b72-information-content-evaluation-of-the-proposed-features-2026-10-28)).
 
-- [x] Implement node feature and relational edge calculations from S03 (including missing-value masks).
-- [x] Verify all-pairs directed edges for designs with up to 64 elements; one graph per design/candidate/target, not separate group graphs.
-- [x] Match source and candidate nodes by stable ID, not order guesses or ID semantics.
-- [x] Implement optional frozen text embeddings and graph-batch tests.
-- [x] Test tensor sizes, finite values, determinism, and a GNN forward/backward pass with *test fixtures*.
+### M2B — Computed candidate pipeline (Developer 2)
 
-Implemented; see [graph_features.md](graph_features.md).
-
-**Exit:** graph tensors satisfy the versioned feature contract; the model code can run without real preference labels.
-
-### M2B — Computed candidate pipeline (Developer 2; when available, **parallel with M2A**)
-
-- [ ] Implement S02 controlled updates and/or immutable candidate-layout installation.
-- [ ] Build simple proportional/scaled baseline and meaningful layout templates.
-- [ ] Produce multiple reproducible candidate layouts with distinct composition families.
-- [ ] Validate Adobe retention/policy/geometry rules and report violations.
-- [ ] Implement deterministic heuristic scoring and correct preview renderer.
-- [ ] Demonstrate full pipeline without any model or GPU dependency.
+- [ ] S02 controlled updates and/or immutable candidate-layout installation.
+- [ ] Proportional baseline and composition templates; multiple reproducible candidates.
+- [x] Allowlisted generator edit helper `layout_edit` (`engine/layout_edits.py`), derived from the validator's `mutable_fields`, with unit tests; `baseline_proposal` emits elements only through it ([spec §8.1.6](TECHNICAL_SPEC.md#816-stage-1-design-property-preservation-project-requirement)). Deviation: it works on Adobe element dicts and is independent of the still-planned S02 `with_updates`.
+- [x] Property tests for the implemented baseline family on the three samples (only K6 fields differ; protected data identical; source unmodified).
+- [ ] Property tests for each planned family (VERTICAL_STACK, HORIZONTAL_FLOW, TWO_COLUMN, HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY): deferred until each exists; each must use `layout_edit`.
+- [x] Regression tests naming text, fill and stroke color, stroke width and removal, opacity, rotation, `z_index` and `font_size` on non-text elements, plus permitted changes still passing ([spec §8.1.6](TECHNICAL_SPEC.md#816-stage-1-design-property-preservation-project-requirement)).
+- [x] Hard validation and violation reports ([spec §8.1](TECHNICAL_SPEC.md#81-constraint-specification-single-authoritative-section)).
+- [x] Bounded retry with proportional geometric repair; exhaustion raises `NoFeasibleLayout`.
+- [ ] Deterministic heuristic scoring (`score_deterministic`, [spec D.1.5](reference/D_candidate_generation.md#d15-soft-objective-fully-defined-enough-to-implement)) with provisional weights, and a verified preview renderer.
+- [ ] Calibrate the scorer's weights and text-fit constants against rendered examples and human labels ([spec D.1.6](reference/D_candidate_generation.md#d16-calibrating-the-deterministic-objective-procedure-nothing-here-has-been-run)); until then results are labelled provisional.
+- [ ] Demonstrate the full pipeline without a model or GPU.
 
 **Exit:** at least one tested sample produces reproducible validated candidates and renderable previews; extreme-case infeasibility is documented, not hidden.
 
-**Implemented subset:** the output gate and proportional repair; see [output_validation.md](output_validation.md). The template generator, renderer checks, heuristic scorer and GNN selection are not implemented.
+### M3 — Annotation and dataset (Developer 1 lead)
 
-### M3 — Annotation and dataset (Developer 1 lead; Developer 2 supports)
+- [x] Phase 1 original source templates, source schema/quality checks, actual renderer previews, manifest, duplicate quarantine, review gallery/exclusion and approved-source S04 handoff ([SOURCE_DATA_PIPELINE.md](SOURCE_DATA_PIPELINE.md)); regression tests in the dedicated source/renderer CI job.
+- [ ] Human approval of the 20-source pilot, then family-diverse expansion; no pilot source is automatically approved by structural validation.
+- [ ] Side-by-side UI (A/B, tie, both-bad, optional reason, randomized placement).
+- [ ] Records: source/candidate IDs, target, displayed order, label, generator/renderer versions.
+- [ ] Pilot of diverse human judgments; examine ambiguities and consistency.
+- [ ] Source-design-grouped splits; untouched final test sources.
+- [ ] Reproducible dataset manifest and loader.
 
-- [ ] Build side-by-side UI: A/B, tie, both-bad, optional reason, randomized placement.
-- [ ] Record source/candidate IDs, target, actual shown order, annotation, generator/renderer versions.
-- [ ] Collect an initial small pilot of diverse human judgments; examine ambiguities and label consistency.
-- [ ] Split train/validation/test by **source design**; reserve untouched sources for final evaluation.
-- [ ] Create reproducible dataset manifest and training loader.
+**Exit:** labels trace to exact validated candidate JSON and reliable previews with no source leakage.
 
-**Exit:** labels can be traced to exact validated candidate JSON and reliable previews, with no source leakage across splits.
+### M4 — Ranker, evaluation and integration (both)
 
-### M4 — Ranker, evaluation, and integration (both)
+- [x] GATv2 architecture; forward/backward on CPU (CUDA when available).
+- [x] Versioned checkpoints; batched scoring with explicit failure behavior.
+- [ ] Simple learned baseline; held-out pairwise metrics.
+- [ ] GNN trained on human preferences.
+- [ ] Compare GNN to deterministic ranking on the same valid candidate sets.
+- [ ] Compare `graph_v3` and `graph_v4` rankers on human labels, including font-size-differing pairs (overflow, unreadably small, appropriate); `graph_v4` becomes the default only if the team's pre-written rule is met ([spec B.7.3](reference/B_graph_features.md#b73-still-required-before-the-default-changes-or-any-improvement-is-claimed)).
+- [ ] Implement `rank_candidates` (Developer 1) with the deterministic fallback and its tests, then connect it to selection.
+- [ ] Test validity, retention, extreme canvases, runtime, end-to-end human preference.
+- [ ] Diverse top-K internal alternatives while `resize` returns one design.
 
-- [x] Implement the S03 GATv2 architecture and test forward/backprop on CPU and CUDA.
-- [x] Implement versioned checkpoints and batched scoring with explicit model/encoder failure behavior.
-- [ ] Train simple learned ranking baseline before/alongside GNN; record held-out pairwise metrics.
-- [ ] Train GNN with human preference comparisons; do not infer element-importance ground truth from attention.
-- [ ] Compare GNN ranking to deterministic ranking using the *same valid candidate sets*.
-- [ ] Connect optional learned scores to selection; preserve deterministic fallback if checkpoint is absent/incompatible.
-- [ ] Test validity, element preservation, extreme canvases, runtime, and end-to-end human preferences.
-- [ ] Keep diverse top-K internal/demo alternatives while official `resize(...)` returns only one design.
+**Exit:** reproducible end-to-end resize, real comparison data, explicit failure/fallback tests, no unsupported visual-quality claims.
 
-The architecture/scoring foundation is implemented; see [ranker.md](ranker.md). No trained checkpoint or fallback integration exists.
+## 5. Stage-one submission checklist
 
-**Exit:** reproducible end-to-end resize, actual comparison data, explicit failure/fallback tests, no unsupported visual-quality claims.
+Deliverables per [Appendix F](reference/F_submission_and_adobe_questions.md). Unlike the milestone boxes above,
+these were checked by inspection or a one-off run, stated on each line; none is a hosted-CI or Adobe-scoring result.
 
-## 7. Collaboration rules
+- [x] Engine code: `resize()` returns a validated proportional fit (basic quality; spec §10.1).
+- [x] `Dockerfile` builds and runs with `--network none` (run once on one Windows host, 2026-10-28; Apple reference machine untested).
+- [x] Root README: approach, how to run, tests, Docker, status.
+- [ ] Viewer add-on: `FAQ.md:105` says required (not scored), the brief says finale-only. Not started; blocked on Adobe's answer (Appendix F, Q-viewer).
+- [ ] Confirm the submission channel and code-freeze date (announced separately by Adobe).
+- [ ] Answers to the Adobe questions in Appendix F (U1, U8, U9, U11, batch behavior).
 
-- **Branch ownership:** Developer 1 uses feature branches for S02/S03/S05; Developer 2 uses separate branches for S04/S06. Merge S02 foundation before teammate extends it.
-- **Changes to shared contracts:** propose in a PR, update spec/config and tests in the same change, and coordinate before either developer builds on the altered signature.
-- **No duplicate models:** no alternative Adobe data classes, schema parsers, candidate identity conventions, or ad hoc feature ordering in parallel branches.
-- **PR handoff checklist:** what changed; imports/functions exposed; test command and observed result; remaining limitations; any effect on other owner's code.
-- **Honest status:** mark only tested work complete; planned architecture is not evidence of an implemented model, renderer, or contest compliance.
-- **Agent instructions:** `AGENTS.md` links to this file, but milestone ownership and evolving status live **here**, not duplicated across prompts.
+## 6. Collaboration rules
 
-## 8. Document references / authority
-
-1. Official Adobe challenge rules and FAQ; Adobe v0.9 JSON Schema; existing `engine/resize.py` contract.
-2. `docs/internal_schema.md`: exact shared data representation specification.
-3. `docs/S03_graph_ranker_spec.md`, `docs/graph_features.md`, `docs/ranker.md`, `docs/output_validation.md`: implemented contracts. `docs/planning/`: S04–S06 proposals.
-4. This file: task ownership, dependencies, handoffs, and milestones.
-5. `AGENTS.md`: coding-agent behavior and development conventions.
-
-**If anything in this plan conflicts with the official schema/rules or actual checked-in code, investigate and update the affected spec/plan before relying on it.**
+- **Branches:** Developer 1 uses feature branches for S02/S03/S05; Developer 2 for S04/S06. Merge the S02 foundation before it is extended.
+- **Shared contracts:** change them in a PR that updates [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) and tests together.
+- **No duplicate models:** no alternative Adobe classes, parsers, candidate identity conventions or ad hoc feature ordering.
+- **PR checklist:** what changed; functions exposed; test command and observed result; limitations; effect on the other owner.
+- **Honest status:** mark only inspected, tested work complete.
+- **Agent instructions:** [AGENTS.md](../AGENTS.md) covers workflow; progress lives here, not duplicated across prompts.

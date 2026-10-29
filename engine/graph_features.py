@@ -1,6 +1,7 @@
-"""S03 graph_v3: deterministic source/candidate graphs, not layout scores.
+"""S03 graph_v3 / graph_v4: deterministic source/candidate graphs, not layout scores.
 
-Feature order follows docs/S03_graph_ranker_spec.md sections 3–4.
+Feature order follows docs/reference/B_graph_features.md (B.3 edge, B.4 node features).
+graph_v3 is the default and is unchanged; graph_v4 appends two typography features (B.4.3).
 No Adobe data is changed, and no candidate is certified as contest-compliant.
 """
 
@@ -17,6 +18,7 @@ from torch_geometric.data import Data
 
 from engine.internal_schema import ABSENT, Canvas, Design, Element
 from engine.text_embeddings import TEXT_DIMENSION, TextEmbeddingCache
+from engine.text_fit import estimate_text_height
 
 
 FEATURE_CONTRACT_VERSION = "graph_v3"
@@ -54,6 +56,28 @@ NODE_FEATURE_INDEX = MappingProxyType({name: i for i, name in enumerate(NODE_FEA
 EDGE_FEATURE_INDEX = MappingProxyType({name: i for i, name in enumerate(EDGE_FEATURE_NAMES)})
 NODE_DIMENSION = 57
 EDGE_DIMENSION = 31
+
+# graph_v4 appends one node and one edge feature; columns 0:57 and 0:31 are exactly graph_v3.
+FEATURE_VERSION_V3 = "graph_v3"
+FEATURE_VERSION_V4 = "graph_v4"
+NODE_FEATURE_NAMES_V4 = NODE_FEATURE_NAMES + ("text_fit_height_ratio",)
+EDGE_FEATURE_NAMES_V4 = EDGE_FEATURE_NAMES + ("size_order_preserved",)
+NODE_FEATURE_INDEX_V4 = MappingProxyType({name: i for i, name in enumerate(NODE_FEATURE_NAMES_V4)})
+EDGE_FEATURE_INDEX_V4 = MappingProxyType({name: i for i, name in enumerate(EDGE_FEATURE_NAMES_V4)})
+NODE_DIMENSION_V4 = 58
+EDGE_DIMENSION_V4 = 32
+FEATURE_DIMENSIONS = MappingProxyType({
+    FEATURE_VERSION_V3: (NODE_DIMENSION, EDGE_DIMENSION),
+    FEATURE_VERSION_V4: (NODE_DIMENSION_V4, EDGE_DIMENSION_V4),
+})
+SUPPORTED_FEATURE_VERSIONS = tuple(FEATURE_DIMENSIONS)
+
+
+def feature_dimensions(feature_version: str) -> tuple[int, int]:
+    """Return (node, edge) widths for a supported feature version, else ValueError."""
+    if not isinstance(feature_version, str) or feature_version not in FEATURE_DIMENSIONS:
+        raise ValueError(f"unsupported feature version {feature_version!r}; expected one of {SUPPORTED_FEATURE_VERSIONS}")
+    return FEATURE_DIMENSIONS[feature_version]
 
 
 def _clip(value: Fraction | float, low: float, high: float) -> float:
@@ -193,6 +217,35 @@ def _node_features(
     return row
 
 
+def _text_fit_height_ratio(proposed: Element) -> float:
+    """graph_v4 node feature: clip(estimated text height / candidate height, 0, 4) / 4.
+
+    Zero on non-text nodes and for candidate boxes with a nonpositive width or height. For a valid
+    text box the estimate is positive, so zero on a text node marks an invalid box. The estimate is
+    defined once in engine.text_fit (docs D.1.5) and is not measured glyph layout.
+    """
+    if proposed.type != "text" or proposed.height <= 0:
+        return 0.0
+    height = estimate_text_height(
+        proposed.content, proposed.width, proposed.font_size, proposed.effective_value("line_height"),
+    )
+    if height is None:
+        return 0.0
+    return _clip(height / Fraction(proposed.height), 0, 4) / 4
+
+
+def _size_order_preserved(
+    source_a: Element, source_b: Element, candidate_a: Element, candidate_b: Element,
+) -> float:
+    """graph_v4 edge feature for text-text pairs: +1 if the candidate font-size order equals the
+    source order, -1 if reversed, 0 if either pair is tied; zero when either node is not text."""
+    if source_a.type != "text" or source_b.type != "text":
+        return 0.0
+    source_order = (source_a.font_size > source_b.font_size) - (source_a.font_size < source_b.font_size)
+    candidate_order = (candidate_a.font_size > candidate_b.font_size) - (candidate_a.font_size < candidate_b.font_size)
+    return float(source_order * candidate_order)
+
+
 def _gap(a_min: Fraction, a_max: Fraction, b_min: Fraction, b_max: Fraction) -> Fraction:
     if b_min >= a_max:
         return b_min - a_max
@@ -307,13 +360,18 @@ def build_candidate_graph(
     target: Canvas,
     *,
     text_embeddings: TextEmbeddingCache | None = None,
+    feature_version: str = FEATURE_VERSION_V3,
 ) -> Data:
     """Build CPU tensors in source order, matching candidate elements by ID.
 
     Identity/type/canvas compatibility is checked, not full stage-one policy.
     Candidate array order may differ; output node order always follows source.
     Optional embeddings describe literal SOURCE text and never inspect assets.
+    `feature_version` selects graph_v3 (default, unchanged) or graph_v4, whose first 57 node and
+    first 31 edge columns equal graph_v3 and which appends the two typography features of B.4.3.
     """
+    _, edge_dimension = feature_dimensions(feature_version)
+    v4 = feature_version == FEATURE_VERSION_V4
     matched = _match_candidate(source, candidate, target)
     count = len(source.elements)
     src_boxes = [_Box.of(element) for element in source.elements]
@@ -325,6 +383,8 @@ def build_candidate_graph(
                        count)
         for element, proposed, a, b in zip(source.elements, matched, src_boxes, cand_boxes)
     ]
+    if v4:
+        nodes = [row + [_text_fit_height_ratio(proposed)] for row, proposed in zip(nodes, matched)]
     vectors = torch.zeros((count, TEXT_DIMENSION), dtype=torch.float32, device="cpu")
     masks = torch.zeros((count, 1), dtype=torch.float32, device="cpu")
     encoder_version = text_embeddings.encoder_version if text_embeddings is not None else "none"
@@ -352,8 +412,11 @@ def build_candidate_graph(
         cosine = _clip(torch.dot(directions[i], directions[j]).item(), -1, 1) if semantic else 0.0
         src = _pair_geometry(src_boxes[i], src_boxes[j], source.source_canvas)
         cand = _pair_geometry(cand_boxes[i], cand_boxes[j], target)
-        edges.append(src + [float(group), float(z_known), float(z_sign), cosine, float(semantic)]
-                     + cand[:5] + cand[7:])
+        row = (src + [float(group), float(z_known), float(z_sign), cosine, float(semantic)]
+               + cand[:5] + cand[7:])
+        if v4:
+            row.append(_size_order_preserved(a, b, matched[i], matched[j]))
+        edges.append(row)
     available = int(masks.sum().item())
     status = ("no_text" if text_count == 0 else "none" if available == 0
               else "complete" if available == text_count else "partial")
@@ -363,9 +426,9 @@ def build_candidate_graph(
         text_vec=vectors,
         text_mask=masks,
         edge_index=torch.tensor(pairs, dtype=torch.int64, device="cpu").reshape(-1, 2).t().contiguous(),
-        edge_attr=torch.tensor(edges, dtype=torch.float32, device="cpu").reshape(-1, EDGE_DIMENSION),
+        edge_attr=torch.tensor(edges, dtype=torch.float32, device="cpu").reshape(-1, edge_dimension),
         element_ids=tuple(element.id for element in source.elements),
-        context_version=FEATURE_CONTRACT_VERSION,
+        context_version=feature_version,
         graph_topology="dense_v1" if count <= 64 else "sparse_v1",
         text_encoder_version=encoder_version,
         text_embedding_status=status,

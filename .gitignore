@@ -20,3 +20,6 @@ venv/
 # Generated run artifacts
 output/*
 !output/.gitkeep
+
+# Development datasets, previews, review records and handoffs (fixtures live in tests/).
+/data/

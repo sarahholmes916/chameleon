@@ -198,3 +198,73 @@ def test_cli_does_not_write_or_render_a_failed_task(monkeypatch, tmp_path):
         main_module.main()
     assert list(output_dir.iterdir()) == []
     assert rendered == []
+
+
+# --- Stage-1 property preservation (docs/TECHNICAL_SPEC.md K6 and 8.1.6) ---
+# Only x, y, width, height and text font_size may change. These tests run the production validator.
+
+def protected_design_json():
+    # Every element sits well inside the canvas, so a rejected mutation can only fail the policy check.
+    return {"canvas": {"width": 400, "height": 400}, "elements": [
+        {"id": "headline", "type": "text", "x": 40, "y": 40, "width": 200, "height": 50,
+         "content": "Hello", "font_family": "Solstice Sans", "font_size": 20, "color": "#112233"},
+        {"id": "badge", "type": "shape", "x": 40, "y": 120, "width": 100, "height": 50,
+         "shape_type": "rectangle", "fill_color": "#445566", "stroke_color": "#778899",
+         "stroke_width": 2, "group_id": "g"},
+        {"id": "photo", "type": "image", "x": 200, "y": 120, "width": 100, "height": 100,
+         "asset_id": "a.png"},
+    ]}
+
+
+PROTECTED_CHANGES = [
+    ("text color", 0, lambda e: e.update(color="#ffffff")),
+    ("shape fill color", 1, lambda e: e.update(fill_color="#000000")),
+    ("stroke color", 1, lambda e: e.update(stroke_color="#000000")),
+    ("stroke width", 1, lambda e: e.update(stroke_width=5)),
+    ("stroke removed", 1, lambda e: e.pop("stroke_color")),
+    ("stroke set to null", 1, lambda e: e.update(stroke_color=None)),
+    ("opacity", 0, lambda e: e.update(opacity=0.5)),
+    ("rotation", 0, lambda e: e.update(rotation=3)),
+    ("z_index", 0, lambda e: e.update(z_index=9)),
+    ("font_size on a shape", 1, lambda e: e.update(font_size=9)),
+    ("font_size on an image", 2, lambda e: e.update(font_size=9)),
+]
+
+
+@pytest.mark.parametrize("index,mutation", [c[1:] for c in PROTECTED_CHANGES],
+                         ids=[c[0] for c in PROTECTED_CHANGES])
+def test_protected_property_changes_fail_only_the_policy_check(index, mutation):
+    raw = protected_design_json()
+    source = Design.from_adobe(raw)
+    candidate = copy.deepcopy(raw)
+    mutation(candidate["elements"][index])
+    report = validate_candidate(source, candidate, source.canvas)
+    element_id = raw["elements"][index]["id"]
+    assert not report.is_valid
+    assert report.schema_ok and report.geometry_ok and not report.policy_ok
+    assert report.violations == (f"{element_id}: immutable fields or optional-field presence changed",)
+
+
+def test_unchanged_candidate_is_valid_control():
+    raw = protected_design_json()
+    report = validate_candidate(Design.from_adobe(raw), copy.deepcopy(raw), Canvas.from_adobe(raw["canvas"]))
+    assert report.is_valid and report.violations == ()
+
+
+@pytest.mark.parametrize("index,changes", [
+    (0, dict(x=60, y=70)),
+    (0, dict(width=150, height=60)),
+    (0, dict(font_size=14)),
+    (0, dict(x=50, y=50, width=180, height=40, font_size=12)),
+    (1, dict(x=150, y=200, width=80, height=40)),
+    (2, dict(x=20, y=250)),
+    (2, dict(width=50, height=50)),
+], ids=["move text", "resize text box", "text font size", "text box and size", "move and resize shape",
+        "move image", "resize image keeping ratio"])
+def test_permitted_changes_still_pass_validation(index, changes):
+    raw = protected_design_json()
+    source = Design.from_adobe(raw)
+    candidate = copy.deepcopy(raw)
+    candidate["elements"][index].update(changes)
+    report = validate_candidate(source, candidate, source.canvas)
+    assert report.is_valid and report.violations == ()

@@ -7,7 +7,7 @@ This file belongs at the **repository root** as `AGENTS.md`. It guides Codex, Cl
 - Input: an Adobe v0.9 **structured design JSON** and a target canvas. Output: a resized design in Adobe's required JSON format.
 - Goal: preserve all required original elements and design intent while adapting extreme aspect ratios; support multiple *internal* candidate layouts and select one submission-compatible result.
 - Architecture: **deterministic candidate generation and validation first**, optional **GNN-based whole-design ranking** second. The computational path is the baseline, candidate-data source, benchmark, and permanent fallback—not a disposable prototype.
-- **Specifications are not implementation evidence.** S02 and S03–S06 were drafted as proposed designs. At the start of a task, inspect the actual checkout to determine which modules, commands, tests, and fixtures really exist. Never claim an unimplemented feature works.
+- **Specifications are not implementation evidence.** `docs/TECHNICAL_SPEC.md` labels every component Implemented, Partial, Planned or Unresolved. At the start of a task, inspect the actual checkout to confirm which modules, commands, tests, and fixtures really exist. Never claim an unimplemented feature works.
 
 ## 2. Source of truth and required reading
 
@@ -15,14 +15,16 @@ For any relevant change, locate and read the applicable files. Do not assume pat
 
 1. **Competition contract:** `RULES.md`, `FAQ.md`, `chameleon_design_schema_v0.9.json`, and any updated official instructions. These take precedence over proposals.
 2. **Current repository behavior:** `engine/resize.py`, real code, tests, input fixtures, and the installed runtime. Verify actual behavior; code may itself violate the competition contract.
-3. **S02 — Internal design representation:** authoritative *design proposal* for parsing, immutability, absence semantics, derived geometry, and round-tripping. Locate its actual path under `docs/` or elsewhere.
-4. **S03 — Graph and ranker specification:** `docs/S03_graph_ranker_spec.md` (implemented contracts; see also `docs/graph_features.md`, `docs/ranker.md`). **S04–S06 proposals** (candidate generation, annotation/training, integration) are in `docs/planning/` and are not implemented.
-5. **Implementation plan:** Locate and read `docs/IMPLEMENTATION_PLAN.md` for developer ownership, current milestone, dependencies, and shared interfaces before changing component boundaries. Confirm that documented progress matches the actual code.
+3. **`docs/TECHNICAL_SPEC.md`:** the single authoritative specification of architecture, interfaces, and constraints, with `docs/reference/` Appendices A–F as parts of it. Its §0.2 states the full precedence order.
+4. **`docs/IMPLEMENTATION_PLAN.md`:** ownership, dependencies, milestones and progress only. Confirm that documented progress matches the actual code.
+5. **`docs/CI.md`:** test and CI procedure.
 6. This file governs agent workflow; it does **not** override official rules, the schema, or a reviewed architecture decision.
 
 When sources disagree, **name the conflict with file and line references** before changing behavior. Do not silently reconcile an uncertainty by inventing a constraint.
 
 ## 3. Three architectural invariants
+
+The authoritative statement of these constraints is `docs/TECHNICAL_SPEC.md` §1.3 and §8; the summary below is a working guardrail, not a second definition.
 
 These are project requirements drawn from the supplied specifications; verify their details against official files before implementing.
 
@@ -34,25 +36,14 @@ These are project requirements drawn from the supplied specifications; verify th
 
 ## 4. Intended component boundaries (confirm actual files)
 
-| Component | Responsibility | Proposed location |
-| --- | --- | --- |
-| Parser/model | Typed `Canvas`, `Element`, `Design`; round-trip, source/target context | `engine/internal_schema.py` |
-| Graph builder | Deterministic feature tensors; exact ID matching; no source mutations | `engine/graph_features.py` |
-| Text encoder | Optional, versioned frozen embeddings; cache with content hash | `engine/text_embeddings.py` |
-| Computational generator | Layout units, template families, search/refinement; no ML dependency | `engine/layout_units.py`, `engine/candidate_generator.py` |
-| Validator | Schema, unchanged-field policy, geometric constraints; diagnostic reports | `engine/candidate_validator.py` |
-| Rankers | Deterministic score always; GNN score only with compatible checkpoint | `engine/layout_objective.py`, `engine/ranker.py` |
-| Option selection | Quality ranking with meaningful diversity, not near-duplicates | `engine/diversify.py` |
-| Integration | Thin Adobe adapter: one output JSON design | `engine/resize.py` |
-| Annotation/training | Reproducible human comparisons, dataset splits, evaluation | `annotation/`, `training/` |
+Component boundaries, file locations and status are defined in `docs/TECHNICAL_SPEC.md` §1.4 and §2; planned file names there are proposals.
 
-Do **not** create all proposed files merely to match this table. Implement only what the current task needs, in the repository's actual structure. Keep parsing, generation, hard validation, learned ranking, and presentation separate.
+Do **not** create all proposed files merely to match the specification's proposed layout. Implement only what the current task needs, in the repository's actual structure. Keep parsing, generation, hard validation, learned ranking, and presentation separate.
 
 ## 5. Graph and ML contracts (S03/S05)
 
 - **One graph per `(source design, candidate layout, target)`**, one node for each original element. Explicit Adobe groups are edge evidence, **not disconnected subgraphs**.
-- For `1 <= N <= 64`, use all `N(N-1)` directed non-self edges (for `N=17`, `E=272`); consult S03 for the deterministic sparse rule beyond 64 elements.
-- Feature contract graph_v3: node numeric tensor `[N,57]`, optional text vectors `[N,384]` plus mask, directed `edge_index` `[2,E]`, edge features `[E,31]`. Match source/candidate elements by exact IDs, not sorted position.
+- Graph topology and the feature contract (shapes, versions, edge counts, sparse rule) are defined only in `docs/reference/B_graph_features.md`. Match source/candidate elements by exact IDs, not sorted position.
 - Edge features capture geometry, alignment, grouping, optional text similarity, and stacking evidence. **GAT attention is not element importance, grouping truth, or a human-readable ranking.** Do not present it as such.
 - Initially train **one edge-aware GNN layout ranker** from human side-by-side preferences. Its output is a scalar *whole-candidate* score conditional on source and target; a node-priority or relation head needs separate training targets.
 - Generate candidate layouts computationally; filter for verified validity **before** aesthetic preference annotation/ranking. Preserve a pure-Python/no-checkpoint baseline path.
@@ -110,13 +101,7 @@ If a behavior cannot be meaningfully automated (for example, subjective visual q
 
 ## 9. Current implementation sequence
 
-1. **M1:** Lossless S02 parser/serializer and tests; preserve existing resize entry point.
-2. **M2:** Computational candidate generator, hard validator, and renderer/preview with verified fidelity; heuristic scorer works without ML.
-3. **M3:** Generate diverse *valid* candidate pairs; side-by-side human annotation UI and clean dataset manifest.
-4. **M4:** Implement graph builder and shape tests, then train/evaluate GNN ranker with held-out source designs.
-5. **M5:** Add diverse top-`k` internal options and optional learned-guided generation; keep one official output and explicit fallback.
-
-Work can proceed in parallel where interfaces are agreed. Do not block correctness and baseline work on a trained model. Keep experiments separate from the competition-facing path until verified.
+Milestones (M1, M2A, M2B, M3, M4), ownership and progress live only in `docs/IMPLEMENTATION_PLAN.md`. Work can proceed in parallel where interfaces are agreed. Do not block correctness and baseline work on a trained model. Keep experiments separate from the competition-facing path until verified.
 
 ## 10. Communication / deliverable format
 
