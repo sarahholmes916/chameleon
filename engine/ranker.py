@@ -24,25 +24,36 @@ from torch_geometric.data import Batch, Data
 from torch_geometric.nn import GATv2Conv, global_max_pool, global_mean_pool
 
 from engine.graph_features import (
-    EDGE_DIMENSION, FEATURE_CONTRACT_VERSION, NODE_DIMENSION, build_candidate_graph,
+    FEATURE_VERSION_V3, FEATURE_VERSION_V4, SUPPORTED_FEATURE_VERSIONS, build_candidate_graph,
+    feature_dimensions,
 )
 from engine.internal_schema import Canvas, Design
 from engine.text_embeddings import TEXT_DIMENSION, TextEmbeddingCache
+from engine.text_fit import GLYPH_ADVANCE_EM, TEXT_FIT_ESTIMATOR_VERSION
 
 
-RANKER_VERSION = "gatv2_ranker_v3"
+RANKER_VERSION = "gatv2_ranker_v3"  # the default (graph_v3) architecture
+RANKER_VERSIONS = {FEATURE_VERSION_V3: "gatv2_ranker_v3", FEATURE_VERSION_V4: "gatv2_ranker_v4"}
 CHECKPOINT_VERSION = "ranker_checkpoint_v1"
 
 
-def _architecture() -> dict[str, Any]:
-    return dict(
-        version=RANKER_VERSION, numeric_dim=NODE_DIMENSION, edge_dim=EDGE_DIMENSION, text_dim=TEXT_DIMENSION,
+def _architecture(feature_version: str = FEATURE_VERSION_V3) -> dict[str, Any]:
+    numeric_dim, edge_dim = feature_dimensions(feature_version)
+    architecture = dict(
+        version=RANKER_VERSIONS[feature_version], numeric_dim=numeric_dim, edge_dim=edge_dim,
+        text_dim=TEXT_DIMENSION,
         text_projection_dim=32, hidden_dim=128, heads=4, layers=3,
         pooling=["mean", "max"], mlp_hidden_dim=128,
         residual="linear_first_identity_rest", normalization="node_layer_norm",
         masked_text_projection=True, attention_dropout=0.0,
         add_self_loops=True, fill_value=0.0, pyg_version="2.8.1",
     )
+    if feature_version == FEATURE_VERSION_V4:
+        # graph_v4 feature values depend on the text-fit estimate; record it so a changed
+        # estimator cannot silently reuse a checkpoint trained on the old values.
+        architecture.update(text_fit_estimator=TEXT_FIT_ESTIMATOR_VERSION,
+                            text_fit_glyph_advance_em=float(GLYPH_ADVANCE_EM))
+    return architecture
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +67,7 @@ class RankerConfig:
     dropout: float = 0.10
     text_encoder_version: str = "none"
     graph_topologies: tuple[str, ...] = ("dense_v1",)
+    feature_version: str = FEATURE_VERSION_V3
 
     def __post_init__(self) -> None:
         if (isinstance(self.dropout, bool) or not isinstance(self.dropout, (int, float))
@@ -70,6 +82,8 @@ class RankerConfig:
                 or len(set(topologies)) != len(topologies)):
             raise ValueError("graph_topologies must contain distinct supported identifiers")
         object.__setattr__(self, "graph_topologies", topologies)
+        if self.feature_version not in SUPPORTED_FEATURE_VERSIONS:
+            raise ValueError(f"feature_version must be one of {SUPPORTED_FEATURE_VERSIONS}")
 
 
 def _metadata_values(graph: Data, name: str, count: int) -> list[str]:
@@ -82,7 +96,7 @@ def _metadata_values(graph: Data, name: str, count: int) -> list[str]:
 
 
 class LayoutRanker(nn.Module):
-    """The S03 section 5 network; forward(Data | Batch) returns scores[B].
+    """The network of docs/reference/C_ranker_model.md; forward(Data | Batch) returns scores[B].
 
     Scores are uncalibrated and comparable only within a source/target context.
     No encoder is owned here; embedding inputs are detached, projection trains.
@@ -91,14 +105,15 @@ class LayoutRanker(nn.Module):
     def __init__(self, config: RankerConfig | None = None) -> None:
         super().__init__()
         self.config = config or RankerConfig()
+        self.node_dimension, self.edge_dimension = feature_dimensions(self.config.feature_version)
         self.text_projection = nn.Linear(TEXT_DIMENSION, 32)
         self.convs = nn.ModuleList([
-            GATv2Conv(width, 32, heads=4, concat=True, edge_dim=EDGE_DIMENSION,
+            GATv2Conv(width, 32, heads=4, concat=True, edge_dim=self.edge_dimension,
                       dropout=0.0, add_self_loops=True, fill_value=0.0,
                       residual=False, share_weights=False)
-            for width in (NODE_DIMENSION + 32 + 1, 128, 128)
+            for width in (self.node_dimension + 32 + 1, 128, 128)
         ])
-        self.skips = nn.ModuleList([nn.Linear(NODE_DIMENSION + 32 + 1, 128), nn.Identity(), nn.Identity()])
+        self.skips = nn.ModuleList([nn.Linear(self.node_dimension + 32 + 1, 128), nn.Identity(), nn.Identity()])
         self.norms = nn.ModuleList([nn.LayerNorm(128) for _ in range(3)])
         self.feature_dropout = nn.Dropout(self.config.dropout)
         self.head = nn.Sequential(
@@ -120,8 +135,8 @@ class LayoutRanker(nn.Module):
         if edges.device != device:
             raise ValueError("graph tensors and model must be on the same device")
         for name, shape in (
-            ("x_numeric", (n, NODE_DIMENSION)), ("text_vec", (n, TEXT_DIMENSION)),
-            ("text_mask", (n, 1)), ("edge_attr", (edges.shape[1], EDGE_DIMENSION)),
+            ("x_numeric", (n, self.node_dimension)), ("text_vec", (n, TEXT_DIMENSION)),
+            ("text_mask", (n, 1)), ("edge_attr", (edges.shape[1], self.edge_dimension)),
         ):
             value = getattr(graph, name, None)
             if (not isinstance(value, torch.Tensor) or tuple(value.shape) != shape
@@ -146,7 +161,7 @@ class LayoutRanker(nn.Module):
         else:
             batch = torch.zeros(n, dtype=torch.int64, device=device)
             count = 1
-        if any(v != FEATURE_CONTRACT_VERSION for v in _metadata_values(graph, "context_version", count)):
+        if any(v != self.config.feature_version for v in _metadata_values(graph, "context_version", count)):
             raise ValueError("incompatible graph feature version")
         if any(v not in self.config.graph_topologies for v in _metadata_values(graph, "graph_topology", count)):
             raise ValueError("graph topology is not declared by this ranker")
@@ -268,11 +283,14 @@ def save_ranker_checkpoint(
     """Save explicit provenance and CPU state; never infer that a model is trained."""
     training = _training_metadata(training_metadata)
     state = {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
+    # feature_version is recorded as numeric_/edge_feature_version, not duplicated inside config,
+    # so a graph_v3 manifest keeps exactly its original layout.
+    config = {k: v for k, v in asdict(model.config).items() if k != "feature_version"}
     manifest = dict(
-        checkpoint_version=CHECKPOINT_VERSION, architecture=_architecture(),
-        numeric_feature_version=FEATURE_CONTRACT_VERSION,
-        edge_feature_version=FEATURE_CONTRACT_VERSION,
-        config=asdict(model.config), training=training,
+        checkpoint_version=CHECKPOINT_VERSION, architecture=_architecture(model.config.feature_version),
+        numeric_feature_version=model.config.feature_version,
+        edge_feature_version=model.config.feature_version,
+        config=config, training=training,
         runtime_versions=dict(python=platform.python_version(), torch=str(torch.__version__),
                               pyg=str(torch_geometric.__version__)),
         weights_sha256=_state_hash(state),
@@ -306,10 +324,12 @@ def load_ranker_checkpoint(
             raise ValueError("invalid checkpoint manifest fields")
         if manifest["checkpoint_version"] != CHECKPOINT_VERSION:
             raise ValueError("incompatible checkpoint version")
-        if manifest["architecture"] != _architecture():
-            raise ValueError("incompatible ranker architecture/dimensions")
-        if any(manifest[key] != FEATURE_CONTRACT_VERSION for key in ("numeric_feature_version", "edge_feature_version")):
+        feature_version = manifest["numeric_feature_version"]
+        if (feature_version != manifest["edge_feature_version"]
+                or feature_version not in SUPPORTED_FEATURE_VERSIONS):
             raise ValueError("incompatible numeric/edge feature version")
+        if manifest["architecture"] != _architecture(feature_version):
+            raise ValueError("incompatible ranker architecture/dimensions")
         if (not isinstance(manifest["config"], dict)
                 or set(manifest["config"]) != {"dropout", "text_encoder_version", "graph_topologies"}):
             raise ValueError("checkpoint config must explicitly declare all settings")
@@ -319,7 +339,7 @@ def load_ranker_checkpoint(
             raise ValueError("checkpoint must record Python, Torch, and PyG versions")
         if runtime["pyg"] != str(torch_geometric.__version__):
             raise ValueError("incompatible PyG runtime version")
-        config = RankerConfig(**manifest["config"])
+        config = RankerConfig(**manifest["config"], feature_version=feature_version)
         if expected_config is not None and config != expected_config:
             raise ValueError("checkpoint config does not match expected encoder/topology/dropout")
         training = _training_metadata(manifest["training"])
@@ -374,7 +394,9 @@ def score_candidates(
                 graphs = []
                 for candidate in candidates[start:start + batch_size]:
                     design = candidate if isinstance(candidate, Design) else candidate.design
-                    graphs.append(build_candidate_graph(source, design, target, text_embeddings=text_embeddings))
+                    graphs.append(build_candidate_graph(
+                        source, design, target, text_embeddings=text_embeddings,
+                        feature_version=model.config.feature_version))
                 batch = Batch.from_data_list(graphs).to(device)
                 values = model(batch)
                 if values.shape != (len(graphs),) or not torch.isfinite(values).all().item():

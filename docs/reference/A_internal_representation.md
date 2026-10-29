@@ -1,16 +1,13 @@
-# S02: Internal design representation
+# Appendix A — S02 internal design representation
 
-Status: the S02 foundation is implemented in
-[engine/internal_schema.py](../engine/internal_schema.py). Parsing, immutable
-models, derived views, and serialization are available. Controlled editing and
-the model-level `validate_stage_one()` API remain proposed. A separate
-[output gate](output_validation.md) now validates and repairs resize outputs;
-rendering behavior is unchanged.
+> **Appendix A of [TECHNICAL_SPEC.md](../TECHNICAL_SPEC.md).** This appendix is the authoritative
+> detail for S02 parsing, immutability, absence semantics, derived geometry and serialization.
+> Implementation status, cross-component signatures and output-policy constraints are defined only in
+> the main specification (§2, §3, §8); they are not repeated here.
 
-## Implemented milestone and shared interfaces
+Code: [engine/internal_schema.py](../../engine/internal_schema.py). Tests: [tests/test_internal_schema.py](../../tests/test_internal_schema.py).
 
-Both future consumers should import the same models from
-`engine.internal_schema`; no second JSON parser is needed for graph features.
+## A.1 Public interface
 
 | Public interface | Available behavior |
 | --- | --- |
@@ -39,38 +36,19 @@ array order survive the conversion. Lists passed to direct model constructors
 for elements or runs are detached into tuples. Direct constructors validate
 state too; their `extras` may also reuse an existing frozen view.
 
-The teammate can rely on the table above for source inspection and serialization.
-Direct `Design` construction accepts explicit current/source/target canvases
-and typed elements, but does not certify a layout against an original design.
-`dataclasses.replace` likewise does not enforce cross-design retention policy.
-The proposed `with_updates()`, `with_layout()`, and `validate_stage_one()` are
-deliberately **not implemented** in this milestone. No placeholder candidate,
-graph, ranker, solver, or rendering components are added.
+## A.2 Scope
 
-Install test-only dependencies with `python -m pip install -r requirements-dev.txt`
-and run `python -m pytest -q` from the repository root. The tests include all
-three sample task envelopes, checking their `source` values with and without
-target context, plus validation, immutability, and extension cases.
+Direct `Design` construction accepts explicit current/source/target canvases and typed elements, but
+does not certify a layout against an original design; `dataclasses.replace` likewise enforces no
+cross-design retention policy. Retention and output policy are checked only by `validate_candidate`
+(spec §8.1).
 
-### Integration differences to resolve in later milestones
+The advanced fixture's note suggesting that a missing asset be skipped conflicts with the schema's
+same-ID contract; S02 preserves the element and reference. The core fixture's out-of-range style run
+and negative coordinates are schema-permitted input and are preserved. No source-target feasibility
+or image-proportion checks are applied during parsing.
 
-The implementation request's illustrative orchestration differs from
-[S03–S06 §1](S03_graph_ranker_spec.md#1-modules-and-stable-boundaries):
-that spec declares `generate_candidates(source, target, config)` returning
-`list[LayoutCandidate]`, and its `ValidationReport` exposes `schema_ok`,
-`policy_ok`, and `geometry_ok` rather than `.is_valid`. Its §6 prose also calls
-the outputs `Design` instances, whereas §1 wraps them in `LayoutCandidate`.
-These are future generator/validator interface questions; S02 leaves them open
-and adds no alternative candidate model. The underlying `Design` model and
-`Design.from_adobe(source, target_canvas=...)` agree across these proposals.
-
-The advanced fixture's suggestion to skip a missing asset conflicts with the
-schema's same-ID contract; S02 preserves the element and reference. The core
-fixture's out-of-range run and negative coordinates are schema-permitted input
-and are preserved, as detailed below. No source-target feasibility or image
-proportion checks are applied during parsing.
-
-## Contract and scope
+### A.2.1 Contract and scope
 
 The internal model provides typed access to Adobe v0.9 designs while preserving
 their JSON structure. Here, **normalized** means a consistent internal data
@@ -79,15 +57,15 @@ a canvas are derived views, never replacements for the pixel values.
 
 This specification is based on:
 
-- [Adobe's design schema](../chameleon_design_schema_v0.9.json), including its
+- [Adobe's design schema](../../chameleon_design_schema_v0.9.json), including its
   conditional required fields and additional-property rules.
-- [RULES.md](../RULES.md) and [FAQ.md](../FAQ.md), especially element retention,
+- [RULES.md](../../RULES.md) and [FAQ.md](../../FAQ.md), especially element retention,
   fixed text/font families, asset preservation, and the absence of semantic labels.
-- [engine/resize.py](../engine/resize.py), whose boundary is
+- [engine/resize.py](../../engine/resize.py), whose boundary is
   `resize(source, target_canvas) -> {"canvas": ..., "elements": [...]}`.
-- All three [warm-up](../input/chameleon_sample_level1_warmup.json),
-  [core](../input/chameleon_sample_level2_core.json), and
-  [advanced](../input/chameleon_sample_level3_advanced.json) sample tasks.
+- All three [warm-up](../../input/chameleon_sample_level1_warmup.json),
+  [core](../../input/chameleon_sample_level2_core.json), and
+  [advanced](../../input/chameleon_sample_level3_advanced.json) sample tasks.
 
 The sample files are task envelopes. Only `task["source"]` is an Adobe design;
 `task["target_canvas"]` is a separate resize request. Fields such as `task_id`,
@@ -104,7 +82,7 @@ Output contains exactly `canvas` and `elements` at its root. Internal theme,
 required flags, source/target context, indexes, and computed geometry are never
 introduced into Adobe JSON.
 
-## Representation and presence
+## A.3 Representation and presence
 
 Use Python 3.10 standard-library tools: `dataclasses`, `enum`, `typing`, `copy`,
 `json`, and `types.MappingProxyType`. Models are frozen,
@@ -150,7 +128,7 @@ alone does not protect nested dictionaries/lists: copying or read-only access
 must also prevent callers from mutating model state through `extras`, and edits
 must not alias the source model. Returned JSON is always a fresh mutable tree.
 
-## Element
+## A.4 Element
 
 Use one flat `Element` dataclass with common fields and all schema-defined
 type-specific fields. The `type` discriminator controls conditional validation.
@@ -265,7 +243,7 @@ separate name and must not overwrite the stored bounds. Normalized values can
 be negative or greater than one; do not clamp them. Requiring an explicit
 `Canvas` argument makes the normalization reference unambiguous.
 
-## Canvas
+## A.5 Canvas
 
 `Canvas` is a frozen value object with exactly `width: Integer` and
 `height: Integer`, in pixels, both at least one. Validate these integral values
@@ -294,7 +272,7 @@ always emits the current `canvas`, so merely parsing a source with target contex
 still round-trips the source. A completed resize must explicitly use
 `canvas == target_canvas`; output validation checks this separately.
 
-## Theme
+## A.6 Theme
 
 `Theme` is a frozen, derived inventory of existing values:
 
@@ -327,7 +305,7 @@ invent brand-kit information. `Design.theme` is computed from its current
 elements on access, avoiding stale metadata after replacement. It has no Adobe
 serializer and is never included in the output JSON.
 
-## Design, ordering, and grouping
+## A.7 Design, ordering, and grouping
 
 `Design` combines the current `Canvas`, `tuple[Element, ...]`, and derived
 `Theme`, with the separate source/target canvas context described above.
@@ -358,92 +336,40 @@ layouts. Store source elements only once in that source instance; the candidate
 need not duplicate a full original JSON snapshot. Replacing elements constructs
 a new design, keeping source/target context and rebuilding derived lookups.
 
-## Python APIs and deferred editing proposal
 
-The signatures below describe the complete S02 interface proposal. All except
-the three editing/validation methods marked deferred are now implemented in
-`engine/internal_schema.py`. `Mapping`, `Iterable`, `Literal`, and
-`Any` are available in Python 3.10; postponed annotations can handle forward
-references. `JSONValue` is the recursive type described above.
+## A.8 Editing APIs (planned)
+
+`Element.with_updates(**changes)` and `Design.with_layout(*, canvas, elements)` are **planned** and not
+present in `engine/internal_schema.py`.
 
 ```python
-# Canvas
-@classmethod
-def from_adobe(cls, data: Mapping[str, JSONValue]) -> Canvas: ...
-def to_adobe(self) -> dict[str, JSONValue]: ...
-
-# StyleRun and Element each provide their own from_adobe/to_adobe pair.
-# Element.from_adobe always initializes the INTERNAL required flag to True.
-@classmethod
-def from_adobe(cls, data: Mapping[str, JSONValue]) -> Element: ...
-def to_adobe(self) -> dict[str, JSONValue]: ...
-def effective_value(
-    self, field_name: str,
-) -> Number | str | None | tuple[StyleRun, ...] | Absent: ...
-def normalized_bounds(self, canvas: Canvas) -> tuple[float, float, float, float]: ...
-# Deferred: not available in the foundation milestone.
-def with_updates(self, **changes: Any) -> Element: ...
-
-# Theme
-@classmethod
-def from_elements(cls, elements: Iterable[Element]) -> Theme: ...
-
-# Design
-@classmethod
-def from_adobe(
-    cls,
-    source: Mapping[str, JSONValue],
-    *,
-    target_canvas: Mapping[str, JSONValue] | None = None,
-) -> Design: ...
-def to_adobe(self) -> dict[str, JSONValue]: ...
-def get_element(self, element_id: str) -> Element: ...
-# Deferred: not available in the foundation milestone.
-def with_layout(self, *, canvas: Canvas, elements: Iterable[Element]) -> Design: ...
-def validate_stage_one(self, *, source: Design) -> None: ...
+def with_updates(self, **changes: Any) -> Element: ...                                  # Element
+def with_layout(self, *, canvas: Canvas, elements: Iterable[Element]) -> Design: ...    # Design
 ```
 
-`with_updates` is a validated, copying wrapper around `dataclasses.replace`.
-It accepts declared Adobe field names, rejects unknown names, and prohibits
-changes to `id`, `type`, and internal fields. Setting an optional field to
-`ABSENT` explicitly removes that JSON key; setting a nullable field to `None`
-retains a JSON null. Required fields cannot become absent. Copy any supplied
-style runs and keep extras unchanged. This general field-edit API does not by
-itself certify that edits comply with stage-one policy.
+`with_updates` is a validated, copying wrapper around `dataclasses.replace`. It accepts declared Adobe
+field names, rejects unknown names, and prohibits changes to `id`, `type`, and internal fields. Setting
+an optional field to `ABSENT` removes that JSON key; setting a nullable field to `None` retains a JSON
+null. Required fields cannot become absent. Supplied style runs are copied and extras are unchanged.
 
-`with_layout` installs already-computed pixel geometry; it performs no scaling
-or role inference. It requires exactly the same ordered IDs, types, `required`
-flags, group-field presence/values, and extension data as the current design,
-and retains the original source/target canvas context.
-`validate_stage_one(source=...)` compares
-against the original source as well, including fixed content, font families,
-and asset references. Keep this policy check separate from lossless parsing and
-serialization; source fixtures need not satisfy target-layout constraints.
+`with_layout` installs already-computed pixel geometry; it performs no scaling or role inference. It
+requires exactly the same ordered IDs, types, `required` flags, group-field presence/values and
+extension data as the current design, and retains the original source/target canvas context. These are
+structural construction checks for a well-formed `Design`; **neither method certifies output policy**.
+Policy certification is `validate_candidate` only (spec §8.1).
 
-Illustrative future use (the candidate portion requires deferred APIs), with
-no change to `resize.py` in this milestone:
+Illustrative future use (requires the planned methods):
 
 ```python
 source_design = Design.from_adobe(source, target_canvas=target_canvas)
 assert source_design.to_adobe() == source
 assert all(element.required for element in source_design.elements)
-
-# ID is supplied by the caller; its spelling does not imply a role.
-element = source_design.get_element(element_id)
-fractional_box = element.normalized_bounds(source_design.source_canvas)
-
-# A later layout algorithm supplies these replacement elements in source order.
-assert source_design.target_canvas is not None
-candidate = source_design.with_layout(
-    canvas=source_design.target_canvas,
-    elements=laid_out_elements,
-)
-candidate.validate_stage_one(source=source_design)
-result = candidate.to_adobe()
-assert set(result) == {"canvas", "elements"}
+fractional_box = source_design.get_element(element_id).normalized_bounds(source_design.source_canvas)
+candidate = source_design.with_layout(canvas=source_design.target_canvas, elements=laid_out_elements)
+report = validate_candidate(source_design, candidate, source_design.target_canvas)
 ```
 
-## Serialization and validation boundaries
+## A.9 Serialization and validation of input
 
 Use explicit schema-key allowlists and serializers, never `dataclasses.asdict`
 as the output format. `asdict` would expose internal fields and cannot implement
@@ -474,17 +400,11 @@ Report invalid data with a useful path such as `elements[2].opacity`. Do not
 silently repair values, fill optional defaults, sort arrays, truncate runs,
 clip positions, rewrite colors, or discard missing-asset elements.
 
-Output policy is a separate concern: every original ID exactly once, preserved
-order/type/grouping, all originals required, target dimensions selected,
-unchanged stage-one content/font families/assets, in-bounds placement, and
-appropriate image proportions. `resize.py` describes an approximately 5%
-source-box proportion tolerance with full-bleed/`fit: "cover"` exceptions.
-Any full-bleed decision must use explicit geometry/fit evidence, never an ID
-such as `bg`. Detailed rotated-extent and image-fit checks belong to later
-layout validation; S02 defines their inputs without implementing a solver or
-changing rendering. `required=True` does not certify successful placement.
+Output policy (retention, bounds, image proportions, mutability of fields) is defined in spec §8.1.
+`required=True` does not certify successful placement. Rotated-extent and image-fit checks belong to
+`validate_candidate`; S02 defines their inputs only.
 
-## Sample implications and future acceptance checks
+## A.10 Fixtures and S02 acceptance criteria
 
 | Fixture | Source -> target; element count | Representation checks |
 | --- | --- | --- |
@@ -500,7 +420,7 @@ missing asset does not authorize dropping the element from output: the
 same-ID contract in the schema, rules, and resize boundary takes precedence.
 Asset availability and renderer placeholders are outside this data model.
 
-Foundation acceptance criteria (controlled editing checks remain deferred):
+S02 acceptance criteria (items 5 and 6 depend on the planned editing APIs in A.8; the other items apply to the implemented foundation):
 
 1. Round-trip each sample's `source` with and without target context; assert
    recursive equality, key presence, decoded numeric types, element/run order,
@@ -521,8 +441,3 @@ Foundation acceptance criteria (controlled editing checks remain deferred):
    after replacement. Reject loss/reordering of elements in `with_layout`.
 7. Check stable theme deduplication, run colors, null-stroke exclusion, and the
    retained missing asset reference, without inferred semantic roles.
-
-The implemented foundation has tests in
-[tests/test_internal_schema.py](../tests/test_internal_schema.py). Checks for
-controlled edits, optional removal, `with_layout`, and full stage-one layout
-validation remain requirements for a later implementation.

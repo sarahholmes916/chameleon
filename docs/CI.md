@@ -1,5 +1,7 @@
 # Continuous integration
 
+This file covers CI procedure only. What the tests must establish (acceptance criteria) is in [TECHNICAL_SPEC.md §9](TECHNICAL_SPEC.md#9-verification-and-acceptance-criteria).
+
 The single workflow is `.github/workflows/ci.yml`. It replaces the misplaced
 root-level `workflows/ci.yml`, which GitHub Actions would not discover. It runs
 on pull requests targeting `main`, pushes to `main`, and manual dispatches.
@@ -96,7 +98,7 @@ modules because imports intentionally follow `pytest.importorskip()`.
 
 ```powershell
 .\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/internal_schema.py engine/resize.py engine/candidate_validator.py engine/layout_search.py tests/test_internal_schema.py tests/test_ci.py tests/test_layout_search.py scripts
-.\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/graph_features.py engine/text_embeddings.py engine/ranker.py tests/test_graph_features.py tests/test_ranker.py
+.\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/graph_features.py engine/text_embeddings.py engine/text_fit.py engine/ranker.py tests/test_graph_features.py tests/test_ranker.py
 ```
 
 Lint is scoped to the implemented core/S03 code and CI helpers. Renderer code,
@@ -109,6 +111,9 @@ lint scope. No existing application or model code was reformatted.
   component. Fix installation or the dependency boundary; do not add Torch to core.
 - `CI execution guard FAILED` identifies missing execution, filtering, or an
   unexpected skip. Fix the cause instead of allowing an entire suite to skip.
+- On Windows, fixture-setup `PermissionError: ... Temp\pytest-of-<user>` errors in tests that use `tmp_path` mean the
+  default temp directory is not writable by the current process, not that the code is wrong. Point `TMP` and
+  `TEMP` at a writable directory and rerun.
 - Assertion/collection/lint failures retain nonzero exit codes and diagnostics.
   Missing-checkpoint tests use temporary fixtures; do not download a real model
   to make them pass.

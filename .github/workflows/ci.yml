@@ -83,7 +83,7 @@ jobs:
       - name: Lint graph and ranker code
         run: >-
           python -m ruff check --no-cache
-          engine/graph_features.py engine/text_embeddings.py engine/ranker.py
+          engine/graph_features.py engine/text_embeddings.py engine/text_fit.py engine/ranker.py
           tests/test_graph_features.py tests/test_ranker.py
 
       - name: Verify CPU imports and execute required ML suites

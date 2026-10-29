@@ -17,7 +17,7 @@ from torch_geometric.data import Batch
 from engine.graph_features import build_candidate_graph
 from engine.internal_schema import Canvas, Design
 from engine.ranker import (
-    CHECKPOINT_VERSION, RANKER_VERSION, CheckpointUnavailable, LayoutRanker,
+    CHECKPOINT_VERSION, RANKER_VERSION, RANKER_VERSIONS, CheckpointUnavailable, LayoutRanker,
     ModelInferenceError, RankerConfig, load_ranker_checkpoint,
     save_ranker_checkpoint, score_candidates,
 )
@@ -637,3 +637,156 @@ def test_cuda_forward_backward_and_cpu_eval_agree():
 def test_python_310_syntax():
     for path in (ROOT / "engine" / "ranker.py", Path(__file__)):
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 10))
+
+
+# --- graph_v4 ranker, checkpoint metadata and graph_v3 coexistence ---
+
+V4_CONFIG = RankerConfig(feature_version="graph_v4")
+
+
+def graph_for_v4(n=4, shift=0, cache=None):
+    source = source_design(n)
+    return build_candidate_graph(source, candidate_design(source, shift), source.canvas,
+                                 text_embeddings=cache, feature_version="graph_v4")
+
+
+def test_graph_v4_ranker_architecture_and_versions():
+    model = LayoutRanker(V4_CONFIG)
+    assert RANKER_VERSIONS == {"graph_v3": "gatv2_ranker_v3", "graph_v4": "gatv2_ranker_v4"}
+    assert RANKER_VERSION == "gatv2_ranker_v3"  # the default architecture is unchanged
+    assert (model.node_dimension, model.edge_dimension) == (58, 32)
+    for conv, width in zip(model.convs, (58 + 32 + 1, 128, 128)):
+        assert (conv.in_channels, conv.out_channels, conv.heads, conv.edge_dim) == (width, 32, 4, 32)
+    assert (model.skips[0].in_features, model.skips[0].out_features) == (91, 128)
+    default = LayoutRanker()
+    assert (default.node_dimension, default.edge_dimension) == (57, 31)
+    assert default.config.feature_version == "graph_v3"
+
+
+def test_graph_v4_ranker_scores_and_gradients_reach_the_new_features():
+    batch = Batch.from_data_list([graph_for_v4(), graph_for_v4(shift=2)])
+    batch.x_numeric.requires_grad_(True)
+    batch.edge_attr.requires_grad_(True)
+    scores = LayoutRanker(V4_CONFIG).eval()(batch)
+    assert scores.shape == (2,) and torch.isfinite(scores).all()
+    scores.sum().backward()
+    assert batch.x_numeric.grad[:, 57].abs().sum() > 0
+    assert batch.edge_attr.grad[:, 31].abs().sum() > 0
+
+
+def test_graph_v4_font_only_candidates_get_different_scores_and_new_inputs():
+    raw = source_design(1).to_adobe()
+    raw["elements"][0].update(width=200, height=100)  # large enough that neither size hits the x4 cap
+    source = Design.from_adobe(raw)
+    candidate = source.to_adobe()
+    candidate["elements"][0]["font_size"] = 60
+    small = build_candidate_graph(source, source, source.canvas, feature_version="graph_v4")
+    large = build_candidate_graph(source, Design.from_adobe(candidate), source.canvas, feature_version="graph_v4")
+    assert small.x_numeric[0, 57] != large.x_numeric[0, 57]
+    scores = LayoutRanker(V4_CONFIG).eval()(Batch.from_data_list([small, large]))
+    assert scores[0].item() != scores[1].item()
+
+
+def test_feature_versions_are_not_interchangeable():
+    with pytest.raises(ValueError):
+        LayoutRanker()(graph_for_v4())  # a graph_v3 model rejects a graph_v4 graph
+    with pytest.raises(ValueError):
+        LayoutRanker(V4_CONFIG)(graph_for())  # and the reverse
+    relabelled = graph_for_v4()
+    relabelled.context_version = "graph_v3"
+    with pytest.raises(ValueError, match="incompatible graph feature version"):
+        LayoutRanker(V4_CONFIG)(relabelled)  # even with the right shapes, the version must match
+
+
+@pytest.mark.parametrize("version", ["graph_v2", "graph_v5", "", None])
+def test_unsupported_ranker_feature_version_is_rejected(version):
+    with pytest.raises(ValueError):
+        RankerConfig(feature_version=version)
+
+
+def test_graph_v4_checkpoint_round_trip_records_version_dimensions_and_estimator(tmp_path):
+    model = LayoutRanker(V4_CONFIG).eval()
+    graph = graph_for_v4()
+    expected = model(graph).detach()
+    path = tmp_path / "v4.pt"
+    save_ranker_checkpoint(path, model, training_metadata=provenance())
+    manifest = torch.load(path, weights_only=True)["manifest"]
+    assert manifest["numeric_feature_version"] == manifest["edge_feature_version"] == "graph_v4"
+    architecture = manifest["architecture"]
+    assert (architecture["version"], architecture["numeric_dim"], architecture["edge_dim"]) == (
+        "gatv2_ranker_v4", 58, 32)
+    assert (architecture["text_fit_estimator"], architecture["text_fit_glyph_advance_em"]) == ("text_fit_v1", 0.5)
+    # feature_version is carried by the feature-version fields, so the config layout is unchanged
+    assert set(manifest["config"]) == {"dropout", "text_encoder_version", "graph_topologies"}
+    restored = load_ranker_checkpoint(path, expected_config=V4_CONFIG)
+    assert restored.model.config == V4_CONFIG and restored.model.config.feature_version == "graph_v4"
+    torch.testing.assert_close(restored.model(graph), expected, rtol=0, atol=0)
+
+
+def test_graph_v3_checkpoint_manifest_is_unchanged_and_still_loads(tmp_path):
+    path = tmp_path / "v3.pt"
+    save_ranker_checkpoint(path, LayoutRanker(), training_metadata=provenance())
+    manifest = torch.load(path, weights_only=True)["manifest"]
+    assert manifest["numeric_feature_version"] == manifest["edge_feature_version"] == "graph_v3"
+    assert manifest["architecture"]["version"] == "gatv2_ranker_v3"
+    assert (manifest["architecture"]["numeric_dim"], manifest["architecture"]["edge_dim"]) == (57, 31)
+    assert "text_fit_estimator" not in manifest["architecture"]
+    assert set(manifest["config"]) == {"dropout", "text_encoder_version", "graph_topologies"}
+    assert load_ranker_checkpoint(path).model.config.feature_version == "graph_v3"
+
+
+def test_a_checkpoint_is_only_accepted_for_its_own_feature_version(tmp_path):
+    v3_path, v4_path = tmp_path / "v3.pt", tmp_path / "v4.pt"
+    save_ranker_checkpoint(v3_path, LayoutRanker(), training_metadata=provenance())
+    save_ranker_checkpoint(v4_path, LayoutRanker(V4_CONFIG), training_metadata=provenance())
+    with pytest.raises(CheckpointUnavailable, match="expected"):
+        load_ranker_checkpoint(v4_path, expected_config=RankerConfig())
+    with pytest.raises(CheckpointUnavailable, match="expected"):
+        load_ranker_checkpoint(v3_path, expected_config=V4_CONFIG)
+
+
+@pytest.mark.parametrize("problem", [
+    "v3_weights_relabelled_v4", "v4_weights_relabelled_v3", "numeric_only_version",
+    "edge_only_version", "estimator_constant", "estimator_name",
+])
+def test_inconsistent_graph_v4_metadata_is_rejected(tmp_path, problem):
+    v4_model = problem in ("v4_weights_relabelled_v3", "estimator_constant", "estimator_name",
+                           "numeric_only_version", "edge_only_version")
+    path = tmp_path / "model.pt"
+    save_ranker_checkpoint(path, LayoutRanker(V4_CONFIG if v4_model else RankerConfig()),
+                           training_metadata=provenance())
+
+    def change(manifest):
+        if problem == "v3_weights_relabelled_v4":
+            manifest.update(numeric_feature_version="graph_v4", edge_feature_version="graph_v4")
+        elif problem == "v4_weights_relabelled_v3":
+            manifest.update(numeric_feature_version="graph_v3", edge_feature_version="graph_v3")
+        elif problem == "numeric_only_version":
+            manifest["numeric_feature_version"] = "graph_v3"
+        elif problem == "edge_only_version":
+            manifest["edge_feature_version"] = "graph_v3"
+        elif problem == "estimator_constant":
+            manifest["architecture"]["text_fit_glyph_advance_em"] = 0.6
+        else:
+            manifest["architecture"]["text_fit_estimator"] = "text_fit_v2"
+
+    rewrite_manifest(path, change)
+    with pytest.raises(CheckpointUnavailable, match="incompatible"):
+        load_ranker_checkpoint(path)
+
+
+def test_score_candidates_builds_graphs_in_the_checkpoints_feature_version(tmp_path):
+    source = source_design()
+    candidates = [candidate_design(source, shift) for shift in (0, 2, 4)]
+    scores = {}
+    for name, config in (("graph_v3", RankerConfig()), ("graph_v4", V4_CONFIG)):
+        torch.manual_seed(0)
+        model = LayoutRanker(config)
+        path = tmp_path / f"{name}.pt"
+        save_ranker_checkpoint(path, model, training_metadata=provenance(True))
+        checkpoint = load_ranker_checkpoint(path, expected_config=config)
+        scores[name] = score_candidates(source, candidates, source.canvas, checkpoint=checkpoint)
+        assert len(scores[name]) == 3 and all(isinstance(v, float) and v == v for v in scores[name])
+        assert scores[name] == pytest.approx(score_candidates(
+            source, candidates, source.canvas, checkpoint=checkpoint, batch_size=1), abs=1e-6)
+    assert scores["graph_v3"] != scores["graph_v4"]  # different feature sets and architectures

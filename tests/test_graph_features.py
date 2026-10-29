@@ -18,10 +18,13 @@ from torch_geometric.data import Batch, Data
 from torch_geometric.nn import GATv2Conv
 
 from engine.graph_features import (
-    EDGE_FEATURE_INDEX, EDGE_FEATURE_NAMES, FEATURE_CONTRACT_VERSION,
-    NODE_FEATURE_INDEX, NODE_FEATURE_NAMES, build_candidate_graph,
+    EDGE_DIMENSION_V4, EDGE_FEATURE_INDEX, EDGE_FEATURE_INDEX_V4, EDGE_FEATURE_NAMES,
+    EDGE_FEATURE_NAMES_V4, FEATURE_CONTRACT_VERSION, FEATURE_VERSION_V4, NODE_DIMENSION_V4,
+    NODE_FEATURE_INDEX, NODE_FEATURE_INDEX_V4, NODE_FEATURE_NAMES, NODE_FEATURE_NAMES_V4,
+    build_candidate_graph, feature_dimensions,
 )
 from engine.internal_schema import ABSENT, Canvas, Design, SchemaError
+from engine.text_fit import estimate_text_height
 from engine.text_embeddings import (
     EmbeddingUnavailable, FrozenSentenceTransformerProvider, TextEmbeddingCache,
 )
@@ -757,3 +760,176 @@ def test_core_resize_imports_without_ml_and_new_modules_use_python310_syntax(tmp
     assert result.returncode == 0, result.stderr
     for path in ("engine/graph_features.py", "engine/text_embeddings.py", "tests/test_graph_features.py"):
         ast.parse((ROOT / path).read_text(encoding="utf-8"), feature_version=(3, 10))
+
+
+# --- graph_v4: typography features appended to graph_v3 (docs/reference/B_graph_features.md B.4.3) ---
+
+V4 = "graph_v4"
+
+
+def graph_v4(source, candidate, target=None):
+    return build_candidate_graph(source, candidate, target or source.canvas, feature_version=V4)
+
+
+def text_fit_ratio(candidate_changes, **source_changes):
+    """The graph_v4 text_fit_height_ratio of a single text element after candidate edits."""
+    source = design(element("t", "text", **source_changes), width=1000, height=1000)
+    candidate = candidate_for(source, updates={"t": candidate_changes})
+    return graph_v4(source, candidate).x_numeric[0, NODE_FEATURE_INDEX_V4["text_fit_height_ratio"]].item()
+
+
+def edge_value(graph, i, j, name):
+    column = EDGE_FEATURE_INDEX_V4[name]
+    pairs = edges(graph)
+    return graph.edge_attr[pairs.index((i, j)), column].item()
+
+
+@pytest.mark.parametrize("name,nodes,edge_count", SAMPLES)
+def test_graph_v4_keeps_every_graph_v3_column_and_appends_two(name, nodes, edge_count):
+    task = json.loads((ROOT / "input" / name).read_text(encoding="utf-8"))
+    source = Design.from_adobe(task["source"], target_canvas=task["target_canvas"])
+    target = Canvas.from_adobe(task["target_canvas"])
+    candidate = candidate_for(source, target)
+    before = (source.to_adobe(), candidate.to_adobe())
+    v3 = build_candidate_graph(source, candidate, target)
+    v4 = graph_v4(source, candidate, target)
+    assert v3.context_version == "graph_v3" and v4.context_version == V4
+    assert v4.x_numeric.shape == (nodes, 58) and v4.edge_attr.shape == (edge_count, 32)
+    assert torch.equal(v4.x_numeric[:, :57], v3.x_numeric)
+    assert torch.equal(v4.edge_attr[:, :31], v3.edge_attr)
+    for field in ("text_vec", "text_mask", "edge_index"):
+        assert torch.equal(v4[field], v3[field])
+    assert v4.element_ids == v3.element_ids and v4.graph_topology == v3.graph_topology
+    assert torch.isfinite(v4.x_numeric).all() and torch.isfinite(v4.edge_attr).all()
+    assert before == (source.to_adobe(), candidate.to_adobe())  # inputs are not mutated
+    assert torch.equal(v4.x_numeric, graph_v4(source, candidate, target).x_numeric)  # deterministic
+
+
+def test_graph_v4_names_dimensions_and_default_version():
+    assert FEATURE_VERSION_V4 == V4 and FEATURE_CONTRACT_VERSION == "graph_v3"
+    assert len(set(NODE_FEATURE_NAMES_V4)) == NODE_DIMENSION_V4 == 58
+    assert len(set(EDGE_FEATURE_NAMES_V4)) == EDGE_DIMENSION_V4 == 32
+    assert NODE_FEATURE_NAMES_V4[:57] == NODE_FEATURE_NAMES and EDGE_FEATURE_NAMES_V4[:31] == EDGE_FEATURE_NAMES
+    assert NODE_FEATURE_INDEX_V4["text_fit_height_ratio"] == 57
+    assert EDGE_FEATURE_INDEX_V4["size_order_preserved"] == 31
+    assert feature_dimensions("graph_v3") == (57, 31) and feature_dimensions(V4) == (58, 32)
+    # The default is still graph_v3 and unchanged.
+    source = design(element("a", "text"), element("b", "text"))
+    default = build_candidate_graph(source, source, source.canvas)
+    assert default.context_version == "graph_v3"
+    assert default.x_numeric.shape == (2, 57) and default.edge_attr.shape == (2, 31)
+
+
+@pytest.mark.parametrize("version", ["graph_v2", "graph_v5", "", None, ["graph_v4"]])
+def test_unsupported_feature_version_is_rejected(version):
+    source = design(element("a", "text"))
+    with pytest.raises(ValueError, match="unsupported feature version"):
+        build_candidate_graph(source, source, source.canvas, feature_version=version)
+
+
+@pytest.mark.parametrize("source_changes,candidate_changes,expected", [
+    # 9 chars * 0.5 * 10 / 45 = 1.0 -> 1 line; height 1 * 10 * 1.2 = 12; 12 / 30 / 4
+    (dict(content="abcd efgh", width=45, height=30, font_size=10), {}, 12 / 30 / 4),
+    # paragraphs "aaaa", "", "bb" are 1 line each -> 3 * 10 * 1.2 = 36; 36 / 36 / 4
+    (dict(content="aaaa\n\nbb", width=20, height=36, font_size=10), {}, 36 / 36 / 4),
+    # 40 chars * 0.5 * 10 / 20 = 10 lines -> 10 * 10 * 1.2 = 120; 120 / 100 / 4
+    (dict(content="x" * 40, width=20, height=100, font_size=10), {}, 120 / 100 / 4),
+    # an explicit line_height of 2 -> 1 * 10 * 2 = 20; 20 / 40 / 4
+    (dict(content="abc", width=100, height=40, font_size=10, line_height=2), {}, 20 / 40 / 4),
+    # candidate edits are what is measured: size 20 -> 1 line of 20 * 1.2 = 24; 24 / 48 / 4
+    (dict(content="abc", width=100, height=48, font_size=10), dict(font_size=20), 24 / 48 / 4),
+    # overflowing text is capped at 4 before the /4 scaling
+    (dict(content="x" * 400, width=10, height=10, font_size=10), {}, 1.0),
+])
+def test_text_fit_height_ratio_matches_hand_computed_values(source_changes, candidate_changes, expected):
+    assert text_fit_ratio(candidate_changes, **source_changes) == pytest.approx(expected, rel=1e-6)
+
+
+@pytest.mark.parametrize("changes", [dict(width=0), dict(height=0), dict(width=0, height=0)])
+def test_text_fit_height_ratio_is_zero_for_a_degenerate_candidate_box(changes):
+    assert text_fit_ratio(dict(changes), content="Hello", width=50, height=20, font_size=10) == 0.0
+
+
+def test_text_fit_height_ratio_is_zero_off_text_and_ignores_font_extensions():
+    source = design(element("i", "image", font_size=99, content="ignored text"),
+                    element("s", "shape", font_size=99, content="ignored text"), width=1000, height=1000)
+    graph = graph_v4(source, source)
+    assert graph.x_numeric[:, 57].tolist() == [0.0, 0.0]
+
+
+def test_text_fit_separates_overflowing_from_fitting_sizes_in_identical_boxes():
+    # The font-size-only case that motivated graph_v4: same box, different size.
+    ratios = [text_fit_ratio(dict(font_size=size), content="Shop the Summer Line", width=200, height=60, font_size=12)
+              for size in (8, 24, 80)]
+    assert ratios[0] < ratios[1] < ratios[2] and ratios[2] == pytest.approx(1.0)
+    assert 0 < ratios[1] < 1
+
+
+def test_font_only_candidate_edits_change_exactly_the_typography_columns_in_graph_v4():
+    # Boxes large enough that neither size saturates the x4 overflow cap of the fit feature.
+    source = design(element("a", "text", font_size=60, width=200, height=100),
+                    element("b", "text", font_size=30, width=200, height=100),
+                    element("c", "image"))
+    first = candidate_for(source)
+    second = candidate_for(source, updates={"a": {"font_size": 12}})
+    a, b = graph_v4(source, first), graph_v4(source, second)
+    differing = (a.x_numeric != b.x_numeric).any(dim=0).nonzero().flatten().tolist()
+    assert differing == [53, 54, 57]
+    assert torch.equal(a.x_numeric[1:], b.x_numeric[1:])
+    edge_differing = (a.edge_attr != b.edge_attr).any(dim=0).nonzero().flatten().tolist()
+    assert edge_differing == [31]  # only the text-text size-order edge feature changes
+    for name in ("text_vec", "text_mask", "edge_index"):
+        assert torch.equal(a[name], b[name])
+
+
+def test_size_order_preserved_is_plus_minus_or_zero_for_text_pairs_only():
+    source = design(element("a", "text", font_size=60), element("b", "text", font_size=30),
+                    element("c", "text", font_size=30), element("d", "image"))
+    name = "size_order_preserved"
+    reversed_a = graph_v4(source, candidate_for(source, updates={"a": {"font_size": 12}}))
+    preserved = graph_v4(source, candidate_for(source, updates={"a": {"font_size": 90}}))
+    collapsed = graph_v4(source, candidate_for(source, updates={"a": {"font_size": 30}}))
+    # a is larger than b and c in the source; node indices a=0, b=1, c=2, d=3
+    for i, j in ((0, 1), (1, 0), (0, 2), (2, 0)):
+        assert edge_value(reversed_a, i, j, name) == -1.0   # candidate order reversed
+        assert edge_value(preserved, i, j, name) == 1.0     # candidate order kept
+        assert edge_value(collapsed, i, j, name) == 0.0     # candidate sizes tied
+    for graph in (reversed_a, preserved, collapsed):
+        assert edge_value(graph, 1, 2, name) == 0.0 and edge_value(graph, 2, 1, name) == 0.0  # source tie
+        for other in (0, 1, 2):
+            assert edge_value(graph, other, 3, name) == 0.0 and edge_value(graph, 3, other, name) == 0.0
+        pairs = edges(graph)
+        column = EDGE_FEATURE_INDEX_V4[name]
+        for k, (i, j) in enumerate(pairs):  # the feature is symmetric
+            assert graph.edge_attr[k, column] == graph.edge_attr[pairs.index((j, i)), column]
+
+
+def test_graph_v4_estimator_is_exact_and_safe_at_extreme_inputs():
+    assert estimate_text_height("x", 0, 10, 1.2) is None and estimate_text_height("x", -5, 10, 1.2) is None
+    assert float(estimate_text_height("abcd", 40, 10, 1)) == 10.0  # 1 line * 10 * 1
+    assert estimate_text_height("", 10, 10, 1) == 10  # an empty paragraph is one line
+    for original, proposed in ((1, 10**300), (10**300, 1), (10**300, 10**300)):
+        source = design(element("a", "text", font_size=original, width=1, height=1), width=1, height=1)
+        candidate = candidate_for(source, updates={"a": {"font_size": proposed}})
+        graph = graph_v4(source, candidate)
+        assert torch.isfinite(graph.x_numeric).all() and 0 <= graph.x_numeric[0, 57] <= 1
+
+
+def test_graph_v4_sparse_topology_has_the_extra_edge_column():
+    source = design(*[element(f"t{i}", "text", x=i, y=i % 7, font_size=10 + i) for i in range(70)],
+                    width=200, height=200)
+    graph = graph_v4(source, source)
+    assert graph.graph_topology == "sparse_v1"
+    assert graph.edge_attr.shape == (graph.edge_index.shape[1], 32)
+    assert graph.x_numeric.shape == (70, 58) and torch.isfinite(graph.edge_attr).all()
+
+
+def test_text_fit_module_is_stdlib_only_and_python310_syntax(tmp_path):
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); import engine.text_fit; "
+        "assert not any(name.split('.')[0] in {'torch', 'torch_geometric'} for name in sys.modules)"
+    )
+    result = subprocess.run([sys.executable, "-S", "-c", code, str(ROOT)], cwd=tmp_path,
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    ast.parse((ROOT / "engine/text_fit.py").read_text(encoding="utf-8"), feature_version=(3, 10))
