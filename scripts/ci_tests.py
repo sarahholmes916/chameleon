@@ -15,6 +15,7 @@ SUITES = {
     "core": ("tests/test_internal_schema.py", "tests/test_ci.py", "tests/test_layout_search.py",
              "tests/test_layout_edits.py"),
     "ml": ("tests/test_graph_features.py", "tests/test_ranker.py"),
+    "sources": ("tests/test_source_designs.py",),
 }
 CPU_ALLOWED_SKIPS = {
     "tests/test_ranker.py::test_cuda_forward_backward_and_cpu_eval_agree": "CUDA unavailable",
@@ -103,7 +104,7 @@ def check_environment(suite: str) -> None:
         if any(name.split(".", 1)[0] in ("torch", "torch_geometric") for name in sys.modules):
             raise RuntimeError("core imports loaded an ML dependency")
         print("Core imports succeed without Torch/PyG; output validation and geometric repair are tested.", flush=True)
-    else:
+    elif suite == "ml":
         torch = importlib.import_module("torch")
         pyg = importlib.import_module("torch_geometric")
         print(f"Torch: {torch.__version__}; PyG: {pyg.__version__}; CUDA build: {torch.version.cuda}", flush=True)
@@ -111,6 +112,10 @@ def check_environment(suite: str) -> None:
             raise RuntimeError("ML CI requires a CPU PyTorch wheel, not a CUDA/ROCm build")
         for name in ("engine.graph_features", "engine.text_embeddings", "engine.ranker"):
             importlib.import_module(name)
+    else:
+        for name in ("jsonschema", "PIL", "cr_renderer", "scripts.source_dataset"):
+            importlib.import_module(name)
+        print("Source generation uses local brand assets/fonts and the actual renderer.", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:

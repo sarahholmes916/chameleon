@@ -116,7 +116,8 @@ selection and no diversification in `resize()` today (§5, §6, §7).
 | S04 allowlisted candidate edits | `engine/layout_edits.py` (stdlib only) | **Implemented**; used by `baseline_proposal`; planned families must use it (§8.1.6) |
 | S04 batch candidate generator, layout units, objective, diversification | — | **Planned** (Appendix D) |
 | S05 deterministic scorer | — | **Planned**; requirements settled, interface recommended in §6.2 (U3) |
-| S05 annotation UI, dataset, training, evaluation | — | **Planned** (Appendix E) |
+| S05 original source dataset and review gallery | `scripts/generate_source_designs.py`, `scripts/source_templates.py`, `scripts/source_dataset.py` | **Implemented**, development only; [source pipeline](SOURCE_DATA_PIPELINE.md); human source approval still required |
+| S05 pairwise annotation UI, candidate dataset, training, evaluation | — | **Planned** (Appendix E) |
 | S06 `resize` adapter | `engine/resize.py` | **Partial**: validated proportional fit only |
 | Preview renderer | `renderer/converter/` (vendored, used by `engine/main.py`) | **Implemented**; fidelity to the official scorer **Unresolved** (U9) |
 | CI | `.github/workflows/ci.yml`, `scripts/ci_tests.py` | **Implemented** ([CI.md](CI.md)) |
@@ -387,11 +388,18 @@ idea of `score=None` is dropped. The fallback is silent to the caller's output (
 type) but never silent to developers: `scorer` and `fallback_reason` are returned and must be logged. The
 names `model_missing` / `model_incompatible` are not used (HISTORY.md).
 
-### 6.5 Annotation, dataset, training, evaluation — Planned
+### 6.5 Annotation, dataset, training, evaluation — Partial
 
 [Appendix E](reference/E_annotation_training.md). Requirements that apply to any such work: split by source
 design, persist ties/both-bad and display order, never use heuristic scores as labels, compare the GNN with
 a deterministic scorer and a pooled-feature MLP.
+
+**Implemented source-only phase:** [SOURCE_DATA_PIPELINE.md](SOURCE_DATA_PIPELINE.md) defines the
+development generator, source-quality gate, manifest/review workflow and noninvasive S04 handoff
+(`source`, `target_canvas`, stable source/family IDs, generation manifest). It delegates Adobe parsing
+to S02 and rendering to the existing converter. No production candidate generator, human pairwise
+labels, training or graph changes are included. All sources remain outside the approved pool until
+explicitly reviewed; this does not certify target-output policy (§8).
 
 ---
 
@@ -628,6 +636,7 @@ failed check.
 | `tests/test_ci.py` | CI execution guard | Core |
 | `tests/test_graph_features.py` | Graph tensors, topology, colors, embeddings, batching | Graph and ML / CPU |
 | `tests/test_ranker.py` | Model, checkpoints, scoring failures | Graph and ML / CPU |
+| `tests/test_source_designs.py` | Original source templates, schema, actual previews, duplicates, review exclusion and S04 handoff | Source generation / Renderer |
 
 Ordinary `python -m pytest` skips the graph and ranker modules when torch/PyG are not installed; a skipped module is not evidence that they pass. CI's execution guard rejects such skips ([CI.md](CI.md)). This specification records no test counts or pass/fail results. Local results are not hosted-CI results;
 run the commands in [CI.md](CI.md).

@@ -123,6 +123,8 @@ This is the only milestone numbering in the repository.
 
 ### M3 — Annotation and dataset (Developer 1 lead)
 
+- [x] Phase 1 original source templates, source schema/quality checks, actual renderer previews, manifest, duplicate quarantine, review gallery/exclusion and approved-source S04 handoff ([SOURCE_DATA_PIPELINE.md](SOURCE_DATA_PIPELINE.md)); regression tests in the dedicated source/renderer CI job.
+- [ ] Human approval of the 20-source pilot, then family-diverse expansion; no pilot source is automatically approved by structural validation.
 - [ ] Side-by-side UI (A/B, tie, both-bad, optional reason, randomized placement).
 - [ ] Records: source/candidate IDs, target, displayed order, label, generator/renderer versions.
 - [ ] Pilot of diverse human judgments; examine ambiguities and consistency.

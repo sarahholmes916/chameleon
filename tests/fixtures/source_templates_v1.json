@@ -1,0 +1,52 @@
+[
+  {
+    "family": "centered_editorial",
+    "seed": 42,
+    "sha256": "ee8e3776cd6704b81231977d68a3ab3ce767e002cf03ddf3aa7ddc1a9f803dc9"
+  },
+  {
+    "family": "split_product",
+    "seed": 42,
+    "sha256": "0e9c06b6824e86422b273eddf2d2afb50d72c3ab6e23f87276a297392b7728e7"
+  },
+  {
+    "family": "product_pedestal",
+    "seed": 42,
+    "sha256": "6114b87050458228649a64b02631d3093e2425fc62f783b684a6b84b429eb47e"
+  },
+  {
+    "family": "image_panel",
+    "seed": 42,
+    "sha256": "4f7da0c97430583577f08eb23951bba776f471085c46646455fb49526ae0efe8"
+  },
+  {
+    "family": "type_poster",
+    "seed": 42,
+    "sha256": "95701998ab313080a97a5d2dfa8373b4ae780a8575ca639e87afc782ed127989"
+  },
+  {
+    "family": "event_schedule",
+    "seed": 42,
+    "sha256": "89e2b834080d943e803376b25a3da7058ee81aba32eb554fb639b988be9e862b"
+  },
+  {
+    "family": "information_cards",
+    "seed": 42,
+    "sha256": "914793050b9c1779572a79257c660e66a71656223e7b0f134b026a10541fb1d4"
+  },
+  {
+    "family": "offer_coupon",
+    "seed": 42,
+    "sha256": "a1a4a7bbbc41e32f7da0f3961d534c7e53c0c7c866311f86055d9407f5065407"
+  },
+  {
+    "family": "announcement_bands",
+    "seed": 42,
+    "sha256": "76c68c1c9d870d56e39cfe0799c60b9225b4654fbfe41a2ee60841fa06a1a684"
+  },
+  {
+    "family": "editorial_columns",
+    "seed": 42,
+    "sha256": "55c8b302ee2d41de5cac259259ca7feddf6fb6ca899dd7f9a05ccbcec3938920"
+  }
+]

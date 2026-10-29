@@ -4,6 +4,11 @@
 > `annotation/` or `training/` directory, no human labels and no trained checkpoint. The model being
 > trained is defined in [Appendix C](C_ranker_model.md). Checkpoint provenance requirements are in C.3.
 
+**Implemented prerequisite:** the original source-design pipeline and review gallery are documented in
+[SOURCE_DATA_PIPELINE.md](../SOURCE_DATA_PIPELINE.md). This is source generation only, with explicit
+human approval and whole-template-family lineage for future splits; the candidate annotation, dataset
+adapter and training designs below remain planned. A source approval is not an A/B preference label.
+
 ## E.1 Side-by-side labeling application
 
 **Stack:** a local Gradio Blocks app backed by SQLite or append-only JSONL plus immutable candidate files. Store Adobe JSON, renderer preview, and provenance separately. The UI never edits original submissions.
