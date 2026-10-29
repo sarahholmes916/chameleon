@@ -15,12 +15,13 @@ and newer runs cancel outdated runs for the same PR/ref.
 | `Core / Python 3.10` | Ubuntu, Python 3.10, pytest and Ruff | S02, output validation/repair, allowlisted generator edits and property tests, and CI-guard tests |
 | `Core / Python 3.11` | Ubuntu, Python 3.11, pytest and Ruff | S02, output validation/repair, allowlisted generator edits and property tests, and CI-guard tests |
 | `Graph and ML / CPU` | Ubuntu, Python 3.11, CPU Torch 2.11.0, PyG 2.8.1 | Graph/embedding and ranker tests |
-| `Source generation / Renderer` | Ubuntu, Python 3.11, `requirements-dev.txt` + `requirements-sources.txt` | `tests/test_source_designs.py`: source generation, review/handoff and actual offline PNG rendering |
+| `Source generation / Renderer` | Ubuntu, Python 3.11, `requirements-dev.txt` + `requirements-sources.txt` | `tests/test_source_designs.py` (source generation, review/handoff, actual offline PNG rendering) and `tests/test_annotation.py` (tournament logic, SQLite, import/export, dev candidate generator, Gradio wiring); also installs `requirements-annotation.txt` |
 
 Jobs run independently. Core jobs have a 10-minute timeout; ML has 20 minutes.
 The source/renderer job has a 15-minute timeout and runs `python -m scripts.ci_tests sources`;
 it installs a commit-pinned cr-renderer and uses only local fonts/assets during tests. Its separate
-environment keeps renderer dependencies out of the core job. Missing renderer dependencies fail the
+environment keeps renderer dependencies out of the core job. The job first installs `libegl1`, `libgl1` and `libfontconfig1` with apt: `skia-python` fails to
+import on a bare Linux image with `libEGL.so.1` / `libGL.so.1` not found. Missing renderer dependencies fail the
 job rather than skipping integration tests. Generated tests use temporary directories, not Git data.
 There are no S04/S05 placeholder jobs, model downloads, or real training runs.
 

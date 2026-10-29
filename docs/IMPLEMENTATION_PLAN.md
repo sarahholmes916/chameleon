@@ -125,8 +125,8 @@ This is the only milestone numbering in the repository.
 
 - [x] Phase 1 original source templates, source schema/quality checks, actual renderer previews, manifest, duplicate quarantine, review gallery/exclusion and approved-source S04 handoff ([SOURCE_DATA_PIPELINE.md](SOURCE_DATA_PIPELINE.md)); regression tests in the dedicated source/renderer CI job.
 - [ ] Human approval of the 20-source pilot, then family-diverse expansion; no pilot source is automatically approved by structural validation.
-- [ ] Side-by-side UI (A/B, tie, both-bad, optional reason, randomized placement).
-- [ ] Records: source/candidate IDs, target, displayed order, label, generator/renderer versions.
+- [x] Side-by-side tournament UI (A/B, tie, both-bad, skip, reason tags, randomized placement, bracket, undo, resume) with SQLite storage and JSONL/CSV export ([ANNOTATION_TOURNAMENT.md](ANNOTATION_TOURNAMENT.md)); uses a development-only candidate generator until S04 candidates exist. No human labels collected yet.
+- [x] Records: source/candidate IDs, target, displayed order, label, generator/renderer versions (`preference.v1` export).
 - [ ] Pilot of diverse human judgments; examine ambiguities and consistency.
 - [ ] Source-design-grouped splits; untouched final test sources.
 - [ ] Reproducible dataset manifest and loader.

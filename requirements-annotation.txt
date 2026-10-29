@@ -1,0 +1,5 @@
+# Optional S05 annotation UI only. Not needed by the resize engine, core CI or the ML job.
+# The dev candidate generator additionally needs requirements-sources.txt (real renderer).
+gradio>=5.0,<6
+jsonschema>=4.18,<5
+Pillow>=10,<13
