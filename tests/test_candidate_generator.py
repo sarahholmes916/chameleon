@@ -11,6 +11,7 @@ from engine.candidate_generator import (
     FAMILY_HORIZONTAL_FLOW,
     FAMILY_SCALE_BASELINE,
     FAMILY_VERTICAL_STACK,
+    FILL_EDGE_TOLERANCE_PX,
     FLOW_MAX_SINGLE_BAND_UNITS,
     FONT_GROWTH_CAP,
     GENERATOR_VERSION,
@@ -20,6 +21,7 @@ from engine.candidate_generator import (
     SLOT_SAFETY_FACTOR,
     STACK_MAX_SINGLE_COLUMN_UNITS,
     Slot,
+    _is_fill_member,
     allocate_slots,
     baseline_candidate,
     horizontal_flow_candidates,
@@ -31,6 +33,7 @@ from engine.layout_search import baseline_proposal
 from engine.layout_units import (
     GROUP_MODE_COHESIVE,
     GROUP_MODE_SPLIT,
+    is_background_like,
     required_group_modes,
 )
 from engine.text_fit import estimate_text_height
@@ -307,9 +310,9 @@ def test_background_fills_target_exactly(name, family):
             float(target.width), float(target.height))
 
 
-def test_canvas_fit_maximizes_bg_like_contain_image():
+def test_canvas_fit_maximizes_edge_touching_contain_image():
     source = design(1000, 1000, [
-        image("big", 50, 50, 900, 900, fit="contain"),
+        image("big", 0, 0, 1000, 1000, fit="contain"),
         text("t", 100, 100, 200, 60, content="hi", font_size=20),
     ])
     target = target_canvas(1600, 400)
@@ -337,7 +340,7 @@ def test_rotated_cover_shrinks_to_fit():
     assert report.is_valid, report.violations
 
 
-def test_zero_area_fill_keeps_degeneracy():
+def test_zero_area_slots_keep_degeneracy():
     source = design(1000, 1000, [
         image("line", 100, 100, 0, 500, fit="cover"),
         text("t", 100, 100, 200, 60, content="hi", font_size=20),
@@ -347,9 +350,74 @@ def test_zero_area_fill_keeps_degeneracy():
     assert len(candidates) == 1
     line = boxes_by_id(candidates[0])["line"]
     assert line["width"] == 0.0
-    assert line["height"] == 400.0
+    assert (line["x"], line["y"], line["height"]) == pytest.approx(
+        (432.0, 16.0, 368.0), abs=1e-6)
     report = validate_candidate(source, candidates[0], target)
     assert report.is_valid, report.violations
+
+
+def test_fill_predicate_requires_all_edges():
+    assert FILL_EDGE_TOLERANCE_PX == 1.0
+    canvas = target_canvas(1000, 1000)
+
+    def fills(data):
+        element = design(1000, 1000, [data]).elements[0]
+        return _is_fill_member(element, canvas)
+
+    assert fills(shape("s", 0, 0, 1000, 1000)) is True
+    assert fills(image("i", 0, 0, 1000, 1000, fit="cover")) is True
+    assert fills(text("t", 0, 0, 1000, 1000, content="x", font_size=12)) is True
+    assert fills(shape("s", -5, -5, 1010, 1010)) is True
+    assert fills(shape("s", 1.1, 0, 998.9, 1000)) is False
+    assert fills(shape("s", 0, 0, 998.9, 1000)) is False
+    assert fills(image("i", 100, 100, 200, 200, fit="cover")) is False
+    assert fills(image("i", 0, 0, 1000, 1000, fit="contain")) is False
+
+
+def test_small_cover_photo_slots():
+    source = design(1000, 1000, [
+        image("photo", 100, 100, 200, 200, fit="cover"),
+        text("t", 400, 400, 200, 60, content="hi", font_size=20),
+    ])
+    target = target_canvas(1600, 400)
+    candidates = horizontal_flow_candidates(source, target)
+    assert len(candidates) == 1
+    photo = boxes_by_id(candidates[0])["photo"]
+    assert photo["width"] < 1600.0 and photo["height"] < 400.0
+    report = validate_candidate(source, candidates[0], target)
+    assert report.is_valid, report.violations
+
+
+def test_inset_panel_slots():
+    source = design(1000, 1000, [
+        shape("panel", 50, 50, 900, 900),
+        text("t", 100, 100, 200, 60, content="hi", font_size=20),
+    ])
+    assert is_background_like(source.elements[0], source.source_canvas)
+    target = target_canvas(1600, 400)
+    candidates = horizontal_flow_candidates(source, target)
+    assert len(candidates) == 1
+    panel = boxes_by_id(candidates[0])["panel"]
+    assert panel["width"] < 1600.0 and panel["height"] < 400.0
+    report = validate_candidate(source, candidates[0], target)
+    assert report.is_valid, report.violations
+
+
+def test_no_background_design_slots_everything():
+    source = design(1000, 1000, [
+        shape("a", 100, 100, 200, 200),
+        shape("b", 400, 400, 200, 200),
+        text("t", 100, 500, 200, 60, content="hi", font_size=20),
+        image("logo", 650, 100, 200, 100, fit="contain"),
+    ])
+    target = target_canvas(1600, 400)
+    for candidates in (horizontal_flow_candidates(source, target),
+                       vertical_stack_candidates(source, target)):
+        assert len(candidates) == 1
+        for element in candidates[0]["elements"]:
+            assert (element["width"], element["height"]) != (1600.0, 400.0)
+        report = validate_candidate(source, candidates[0], target)
+        assert report.is_valid, report.violations
 
 
 def test_headline_font_grows_to_ladder_top():
@@ -360,6 +428,45 @@ def test_headline_font_grows_to_ladder_top():
     seed = 56.0 * slot_scale
     assert headline["font_size"] == pytest.approx(seed * 1.1 ** 4)
     assert headline["font_size"] <= seed * FONT_GROWTH_CAP
+
+
+def test_core_badge_respects_headline_hierarchy():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    for candidates in (horizontal_flow_candidates(source, target),
+                       vertical_stack_candidates(source, target)):
+        boxes = boxes_by_id(candidates[0])
+        assert boxes["badge_label"]["font_size"] <= boxes["headline"]["font_size"]
+
+
+def test_hierarchy_cap_inversion_trap():
+    source = design(1000, 1000, [
+        text("big", 100, 100, 300, 60, content="word " * 40, font_size=40),
+        text("small", 100, 500, 400, 100, content="hi", font_size=12),
+    ])
+    target = target_canvas(1600, 400)
+    candidates = horizontal_flow_candidates(source, target)
+    assert len(candidates) == 1
+    boxes = boxes_by_id(candidates[0])
+    assert boxes["big"]["font_size"] < 30.0
+    assert boxes["small"]["font_size"] <= boxes["big"]["font_size"]
+    assert boxes["small"]["font_size"] >= 1.0
+    report = validate_candidate(source, candidates[0], target)
+    assert report.is_valid, report.violations
+
+
+def test_equal_source_sizes_share_cap():
+    source = design(1000, 1000, [
+        text("dense", 100, 100, 300, 60, content="word " * 40, font_size=20),
+        text("roomy", 100, 500, 400, 100, content="hi", font_size=20),
+    ])
+    target = target_canvas(1600, 400)
+    candidates = horizontal_flow_candidates(source, target)
+    assert len(candidates) == 1
+    boxes = boxes_by_id(candidates[0])
+    assert boxes["roomy"]["font_size"] > boxes["dense"]["font_size"]
+    assert boxes["dense"]["font_size"] >= 1.0
+    report = validate_candidate(source, candidates[0], target)
+    assert report.is_valid, report.violations
 
 
 @pytest.mark.parametrize("name", SAMPLES)

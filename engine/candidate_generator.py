@@ -10,12 +10,13 @@ inputs give byte-identical outputs; every ordering tie-breaks by source
 index. Stdlib plus S02/S04 helpers only: no ML-framework imports.
 
 Three placement paths, chosen per unit:
-- Fill: units whose members are all cover images or background-like
-  non-images stretch to the full target canvas (cover images are K9-exempt;
-  shapes and text boxes are free). Zero-rotation, stroke-free singletons
-  land on the exact box; anything rotated, stroked, or multi-member takes
-  the analytic shrink below.
-- Canvas fit: a singleton background-like non-cover image scales uniformly
+- Fill: units whose members all touch every canvas edge in the source
+  (within FILL_EDGE_TOLERANCE_PX) stretch to the full target canvas.
+  Cover images are K9-exempt and shapes/text boxes are free, so only
+  edge-bleeders qualify; area alone never fills. Zero-rotation,
+  stroke-free singletons land on the exact box; anything rotated,
+  stroked, or multi-member takes the analytic shrink below.
+- Canvas fit: a lone edge-bleeding non-cover image scales uniformly
   to the largest centered box inside the canvas (K9 forbids stretching it).
 - Slot: every other unit scales uniformly into its slot (member-relative
   geometry preserved, image ratios exact) with the analytic shrink below.
@@ -29,7 +30,9 @@ MIN_UNIT_SCALE as a best effort for downstream repair to judge.
 
 Text font size is searched per placed box with estimate_text_height: a
 bounded ladder above and below the proportional seed, largest fitting rung
-wins, floor 1.0 (K7).
+wins, floor 1.0 (K7). Growth rungs never exceed any source-larger text's
+decided size (one descending-size pass with a running cap); the seed and
+shrink rungs stay eligible so small boxes still fit-or-floor.
 """
 
 from __future__ import annotations
@@ -44,7 +47,6 @@ from engine.layout_search import baseline_proposal
 from engine.layout_units import (
     LayoutUnit,
     build_layout_units,
-    is_background_like,
     required_group_modes,
 )
 from engine.text_fit import estimate_text_height
@@ -55,12 +57,12 @@ __all__ = [
     "FAMILY_HORIZONTAL_FLOW",
     "FAMILY_SCALE_BASELINE",
     "FAMILY_VERTICAL_STACK",
+    "FILL_EDGE_TOLERANCE_PX",
     "FLOW_MAX_SINGLE_BAND_UNITS",
     "FONT_GROWTH_CAP",
     "FONT_GROWTH_STEP",
     "FONT_GROWTH_STEPS",
     "FONT_SHRINK_STEP",
-    "FONT_SHRINK_STEPS",
     "GENERATOR_VERSION",
     "MARGIN_FRACTION",
     "MIN_UNIT_SCALE",
@@ -85,6 +87,10 @@ SLOT_DIRECTION_VERTICAL = "vertical"
 
 # Usable-rect margin as a fraction of each target axis (D.1.3).
 MARGIN_FRACTION = 0.04
+# A source box "touches" a canvas edge when within this many pixels of it
+# (overhang counts as touching). Separates exact bleed (0px, every fixture
+# background) from any real inset; area alone never qualifies for fill.
+FILL_EDGE_TOLERANCE_PX = 1.0
 # Above this many slotted units, flow splits into two bands / stack into two
 # columns (D.1.3 names one or two bands; the threshold is ours).
 FLOW_MAX_SINGLE_BAND_UNITS = 4
@@ -98,13 +104,12 @@ SLOT_SAFETY_FACTOR = 1.0 - 1e-9
 # Best-effort scale when rotated bounds cannot fit at any scale (absurd
 # fixed strokes); downstream validation decides the candidate.
 MIN_UNIT_SCALE = 1e-6
-# Font ladder around the proportional seed (D.1.4): bounded growth and
-# shrink, largest fitting rung wins, floor 1.0.
+# Font ladder around the proportional seed (D.1.4): bounded growth, shrink
+# descent to the floor, largest fitting rung wins, floor 1.0.
 FONT_GROWTH_STEP = 1.1
 FONT_GROWTH_STEPS = 4
 FONT_GROWTH_CAP = 1.5
 FONT_SHRINK_STEP = 0.9
-FONT_SHRINK_STEPS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,23 +180,38 @@ def allocate_slots(unit_count: int, target: Canvas, *,
     return slots
 
 
-def _is_fill_member(element: Element, canvas: Canvas) -> bool:
-    """Cover images and background-like non-images stretch to full canvas.
+def _touches_every_edge(element: Element, canvas: Canvas) -> bool:
+    """True when the stored source box reaches all four canvas edges."""
+    tolerance = FILL_EDGE_TOLERANCE_PX
+    width = float(canvas.width)
+    height = float(canvas.height)
+    left = float(element.x)
+    top = float(element.y)
+    return (left <= tolerance
+            and top <= tolerance
+            and left + float(element.width) >= width - tolerance
+            and top + float(element.height) >= height - tolerance)
 
-    Non-cover images are never fill members even when background-like:
-    K9 forbids changing their ratio.
+
+def _is_fill_member(element: Element, canvas: Canvas) -> bool:
+    """Edge-bleeding cover images and shapes/text stretch to full canvas.
+
+    Non-cover images are never fill members even when edge-bleeding:
+    K9 forbids changing their ratio (they canvas-fit instead).
     """
+    if not _touches_every_edge(element, canvas):
+        return False
     if element.type == "image":
         return element.effective_value("fit") == "cover"
-    return is_background_like(element, canvas)
+    return True
 
 
 def _is_canvas_fit_unit(unit: LayoutUnit, canvas: Canvas) -> bool:
-    """A lone background-like non-cover image: maximal uniform fit."""
+    """A lone edge-bleeding non-cover image: maximal uniform fit."""
     return (len(unit.members) == 1
             and unit.members[0].type == "image"
             and unit.members[0].effective_value("fit") != "cover"
-            and is_background_like(unit.members[0], canvas))
+            and _touches_every_edge(unit.members[0], canvas))
 
 
 def _rotation_terms(element: Element) -> tuple[float, float, float]:
@@ -322,24 +342,70 @@ def _place_fill(unit: LayoutUnit, target: Canvas) -> dict[str, tuple[float, floa
 
 
 def _search_font_size(content: str, box_w: float, box_h: float, seed: float,
-                      line_height: float) -> float:
-    """Largest ladder rung from the seed that fits, else 1.0 (D.1.4)."""
+                      line_height: float, cap: float) -> float:
+    """Largest fitting rung with growth capped, else 1.0 (D.1.4).
+
+    Only growth rungs above the seed honor the cap; the seed and the
+    shrink descent stay eligible so small boxes fit-or-floor. The descent
+    continues geometrically to the floor (it always terminates: each step
+    multiplies by a factor below one), so a fitting size is never skipped
+    for lack of ladder rungs.
+    """
     rungs = []
     for step in range(FONT_GROWTH_STEPS, 0, -1):
         rung = seed * FONT_GROWTH_STEP ** step
-        if rung <= seed * FONT_GROWTH_CAP:
+        if rung <= seed * FONT_GROWTH_CAP and rung <= cap:
             rungs.append(rung)
     rungs.append(seed)
-    for step in range(1, FONT_SHRINK_STEPS + 1):
-        rung = seed * FONT_SHRINK_STEP ** step
-        if rung >= 1.0:
-            rungs.append(rung)
+    rung = seed
+    while True:
+        rung *= FONT_SHRINK_STEP
+        if rung < 1.0:
+            break
+        rungs.append(rung)
     rungs.append(1.0)
     for rung in dict.fromkeys(rungs):
         estimated = estimate_text_height(content, box_w, rung, line_height)
         if estimated is not None and estimated <= box_h:
             return rung
     return 1.0
+
+
+def _decide_font_sizes(source: Design,
+                       boxes: dict[str, tuple[float, float, float, float]],
+                       scales: dict[str, float]) -> dict[str, float]:
+    """Text sizes in descending source-size order under a running cap.
+
+    Equal source sizes share one cap update, so source ties stay
+    unconstrained; every decision feeds the cap for smaller texts.
+    """
+    ordered = sorted(
+        ((element, position)
+         for position, element in enumerate(source.elements)
+         if element.type == "text"),
+        key=lambda pair: (-float(pair[0].font_size), pair[1]),
+    )
+    fonts: dict[str, float] = {}
+    cap = math.inf
+    start = 0
+    while start < len(ordered):
+        size = float(ordered[start][0].font_size)
+        stop = start
+        while stop < len(ordered) and float(ordered[stop][0].font_size) == size:
+            stop += 1
+        decided = []
+        for element, _ in ordered[start:stop]:
+            placed = boxes[element.id]
+            seed = max(1.0, float(element.font_size) * scales[element.id])
+            choice = _search_font_size(
+                element.content, placed[2], placed[3], seed,
+                float(element.effective_value("line_height")), cap,
+            )
+            fonts[element.id] = choice
+            decided.append(choice)
+        cap = min(cap, min(decided))
+        start = stop
+    return fonts
 
 
 def _order_key_flow(unit: LayoutUnit) -> tuple[float, float, int]:
@@ -389,7 +455,7 @@ def _family_candidates(source: Design, target: Canvas, *,
             boxes.update(placed)
             for element in unit.members:
                 scales[element.id] = scale
-        by_id = source.elements_by_id
+        fonts = _decide_font_sizes(source, boxes, scales)
         elements = []
         for original in source.to_adobe()["elements"]:
             placed = boxes[original["id"]]
@@ -398,11 +464,7 @@ def _family_candidates(source: Design, target: Canvas, *,
                 "width": placed[2], "height": placed[3],
             }
             if original["type"] == "text":
-                seed = max(1.0, float(original["font_size"]) * scales[original["id"]])
-                changes["font_size"] = _search_font_size(
-                    original["content"], placed[2], placed[3], seed,
-                    float(by_id[original["id"]].effective_value("line_height")),
-                )
+                changes["font_size"] = fonts[original["id"]]
             elements.append(layout_edit(original, changes))
         results.append({"canvas": target.to_adobe(), "elements": elements})
     return results
