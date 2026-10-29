@@ -12,8 +12,8 @@ and newer runs cancel outdated runs for the same PR/ref.
 
 | Stable check name | Environment | Required suites |
 | --- | --- | --- |
-| `Core / Python 3.10` | Ubuntu, Python 3.10, pytest and Ruff | S02, output validation/repair, and CI-guard tests |
-| `Core / Python 3.11` | Ubuntu, Python 3.11, pytest and Ruff | S02, output validation/repair, and CI-guard tests |
+| `Core / Python 3.10` | Ubuntu, Python 3.10, pytest and Ruff | S02, output validation/repair, allowlisted generator edits and property tests, and CI-guard tests |
+| `Core / Python 3.11` | Ubuntu, Python 3.11, pytest and Ruff | S02, output validation/repair, allowlisted generator edits and property tests, and CI-guard tests |
 | `Graph and ML / CPU` | Ubuntu, Python 3.11, CPU Torch 2.11.0, PyG 2.8.1 | Graph/embedding and ranker tests |
 
 Jobs run independently. Core jobs have a 10-minute timeout; ML has 20 minutes.
@@ -97,7 +97,7 @@ names, and import checks. Only E402 is exempted in the two optional ML test
 modules because imports intentionally follow `pytest.importorskip()`.
 
 ```powershell
-.\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/internal_schema.py engine/resize.py engine/candidate_validator.py engine/layout_search.py tests/test_internal_schema.py tests/test_ci.py tests/test_layout_search.py scripts
+.\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/internal_schema.py engine/resize.py engine/candidate_validator.py engine/layout_search.py engine/layout_edits.py tests/test_internal_schema.py tests/test_ci.py tests/test_layout_search.py tests/test_layout_edits.py scripts
 .\.venv\ci-core\Scripts\python.exe -m ruff check --no-cache engine/graph_features.py engine/text_embeddings.py engine/text_fit.py engine/ranker.py tests/test_graph_features.py tests/test_ranker.py
 ```
 

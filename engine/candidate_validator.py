@@ -10,6 +10,18 @@ from typing import Any, Mapping
 from engine.internal_schema import Canvas, Design, Element
 
 
+def mutable_fields(element_type: str) -> frozenset[str]:
+    """The only fields a candidate may change (K6, docs/TECHNICAL_SPEC.md section 8.1.1).
+
+    x, y, width and height on every element, plus font_size on text elements. This is the single
+    definition: the validator uses it, and generator-side helpers derive from it.
+    """
+    fields = {"x", "y", "width", "height"}
+    if element_type == "text":
+        fields.add("font_size")
+    return frozenset(fields)
+
+
 @dataclass(frozen=True)
 class ValidationReport:
     schema_ok: bool
@@ -79,9 +91,7 @@ def validate_candidate(
     for element in parsed.elements:
         original = originals.get(element.id)
         if original is not None:
-            allowed = {"x", "y", "width", "height"}
-            if original.type == "text":
-                allowed.add("font_size")
+            allowed = mutable_fields(original.type)
             before = {k: v for k, v in original.to_adobe().items() if k not in allowed}
             after = {k: v for k, v in element.to_adobe().items() if k not in allowed}
             if not _same_json(before, after):

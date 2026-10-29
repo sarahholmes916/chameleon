@@ -109,6 +109,10 @@ This is the only milestone numbering in the repository.
 
 - [ ] S02 controlled updates and/or immutable candidate-layout installation.
 - [ ] Proportional baseline and composition templates; multiple reproducible candidates.
+- [x] Allowlisted generator edit helper `layout_edit` (`engine/layout_edits.py`), derived from the validator's `mutable_fields`, with unit tests; `baseline_proposal` emits elements only through it ([spec §8.1.6](TECHNICAL_SPEC.md#816-stage-1-design-property-preservation-project-requirement)). Deviation: it works on Adobe element dicts and is independent of the still-planned S02 `with_updates`.
+- [x] Property tests for the implemented baseline family on the three samples (only K6 fields differ; protected data identical; source unmodified).
+- [ ] Property tests for each planned family (VERTICAL_STACK, HORIZONTAL_FLOW, TWO_COLUMN, HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY): deferred until each exists; each must use `layout_edit`.
+- [x] Regression tests naming text, fill and stroke color, stroke width and removal, opacity, rotation, `z_index` and `font_size` on non-text elements, plus permitted changes still passing ([spec §8.1.6](TECHNICAL_SPEC.md#816-stage-1-design-property-preservation-project-requirement)).
 - [x] Hard validation and violation reports ([spec §8.1](TECHNICAL_SPEC.md#81-constraint-specification-single-authoritative-section)).
 - [x] Bounded retry with proportional geometric repair; exhaustion raises `NoFeasibleLayout`.
 - [ ] Deterministic heuristic scoring (`score_deterministic`, [spec D.1.5](reference/D_candidate_generation.md#d15-soft-objective-fully-defined-enough-to-implement)) with provisional weights, and a verified preview renderer.

@@ -6,6 +6,7 @@ from typing import Any, Callable, Mapping
 
 from engine.candidate_validator import ValidationReport, element_bounds, validate_candidate
 from engine.internal_schema import Canvas, Design
+from engine.layout_edits import layout_edit
 
 
 class NoFeasibleLayout(RuntimeError):
@@ -89,11 +90,17 @@ def baseline_proposal(source: Design, target: Canvas, attempt: int) -> dict[str,
         sx = sy = scale
         dx = (target.width - (right - left)) / 2 - left
         dy = (target.height - (bottom - top)) / 2 - top
+    # Emit candidate elements only through the K6 allowlist (x, y, width, height, text font_size).
+    laid_out = []
     for element in result["elements"]:
-        element["x"] = element["x"] * sx + dx
-        element["y"] = element["y"] * sy + dy
-        element["width"] *= sx
-        element["height"] *= sy
+        changes = {
+            "x": element["x"] * sx + dx,
+            "y": element["y"] * sy + dy,
+            "width": element["width"] * sx,
+            "height": element["height"] * sy,
+        }
         if element["type"] == "text":
-            element["font_size"] = max(1.0, element["font_size"] * min(sx, sy))
+            changes["font_size"] = max(1.0, element["font_size"] * min(sx, sy))
+        laid_out.append(layout_edit(element, changes))
+    result["elements"] = laid_out
     return result

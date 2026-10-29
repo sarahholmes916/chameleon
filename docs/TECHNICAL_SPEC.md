@@ -113,6 +113,7 @@ selection and no diversification in `resize()` today (§5, §6, §7).
 | S03/S05 GATv2 ranker, checkpoints, scoring | `engine/ranker.py` | **Implemented**, untrained; no trained checkpoint exists |
 | S04 output validator | `engine/candidate_validator.py` | **Implemented** (limitations in §8.1.4) |
 | S04 iterative retry + proportional repair | `engine/layout_search.py` | **Implemented** |
+| S04 allowlisted candidate edits | `engine/layout_edits.py` (stdlib only) | **Implemented**; used by `baseline_proposal`; planned families must use it (§8.1.6) |
 | S04 batch candidate generator, layout units, objective, diversification | — | **Planned** (Appendix D) |
 | S05 deterministic scorer | — | **Planned**; requirements settled, interface recommended in §6.2 (U3) |
 | S05 annotation UI, dataset, training, evaluation | — | **Planned** (Appendix E) |
@@ -164,6 +165,8 @@ exist today accept a plain `Design` (S03) or an object exposing `.design` (`Cand
 | `baseline_proposal` | `(source: Design, target: Canvas, attempt: int) -> dict` | Implemented | `layout_search.py:50` |
 | `validate_candidate` | `(source: Design, candidate: Design \| Mapping[str, Any], target: Canvas) -> ValidationReport` | Implemented; **the authoritative output-policy validator** | `candidate_validator.py:57` |
 | `ValidationReport` | frozen dataclass `(schema_ok: bool, policy_ok: bool, geometry_ok: bool, violations: tuple[str, ...])` with property `is_valid` | Implemented | `candidate_validator.py:14` |
+| `mutable_fields` | `(element_type: str) -> frozenset[str]` | Implemented; the code form of K6 and its single definition, used by the validator and `layout_edit` | `candidate_validator.py` |
+| `layout_edit` | `(element: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]`; raises `ProtectedFieldError` | Implemented; generator-side allowlisted edit of an Adobe element dict (§8.1.6) | `layout_edits.py` |
 | `build_candidate_graph` | `(source: Design, candidate: Design, target: Canvas, *, text_embeddings: TextEmbeddingCache \| None = None, feature_version: str = "graph_v3") -> torch_geometric.data.Data` | Implemented | `graph_features.py:304` |
 | `score_candidates` | `(source: Design, candidates: Sequence[Design \| CandidateWithDesign], target: Canvas, *, checkpoint: RankerCheckpoint \| None = None, text_embeddings: TextEmbeddingCache \| None = None, batch_size: int = 32) -> list[float]` | Implemented | `ranker.py:345` |
 | `score_deterministic` | `(source: Design, candidates: Sequence[Design \| CandidateWithDesign], target: Canvas, *, weights: ObjectiveWeights \| None = None) -> list[float]` | **Planned**; proposed signature, mirrors `score_candidates` (§6.2, U3) | — |
@@ -193,6 +196,7 @@ Checkpoint functions `save_ranker_checkpoint`, `load_ranker_checkpoint`, `Layout
 | Exception | Defined in | Meaning |
 | --- | --- | --- |
 | `SchemaError(ValueError)` (has `.path`) | `internal_schema.py` | Invalid Adobe JSON or invalid model construction |
+| `ProtectedFieldError(ValueError)` | `layout_edits.py` | A generator tried to change a field outside K6 |
 | `NoFeasibleLayout(RuntimeError)` (has `.reports`) | `layout_search.py:11` | Retry budget exhausted without a valid layout; not a proof of infeasibility |
 | `CheckpointUnavailable(RuntimeError)` | `ranker.py` | Missing, corrupt, incompatible or untrained checkpoint |
 | `ModelInferenceError(RuntimeError)` | `ranker.py` | Any failure during scoring (encoder mismatch, unsupported topology, non-finite output, …) |
@@ -273,7 +277,7 @@ settled direction. The signatures, fields and flow below are the **recommended c
 
 | Step | Owner | Rule |
 | --- | --- | --- |
-| Propose layouts | `generate_candidates` | Pure and deterministic for a given `(source, target, config)`. Imports no ML package. Never calls `validate_candidate`, never scores, never raises on an infeasible proposal. Returns candidates in a deterministic order. Every returned `Design` has the target canvas and the original IDs in the original order (built with the planned `Design.with_layout`, A.8). The decision variables of every text element are its box **and** its `font_size` (D.1.4); a generator that only moves or resizes boxes does not satisfy this contract. |
+| Propose layouts | `generate_candidates` | Pure and deterministic for a given `(source, target, config)`. Imports no ML package. Never calls `validate_candidate`, never scores, never raises on an infeasible proposal. Returns candidates in a deterministic order. Every returned `Design` has the target canvas and the original IDs in the original order (built with the planned `Design.with_layout`, A.8). The decision variables of every text element are its box **and** its `font_size` (D.1.4); a generator that only moves or resizes boxes does not satisfy this contract. It may change only the fields permitted by K6 / §8.1.6, through `layout_edit` (`engine/layout_edits.py`), which cannot set any other field. |
 | Decide validity | `validate_candidate` | Only authority (§8.1). Applied to every candidate, including the baseline. |
 | Repair | `find_valid_layout` | Unchanged signature and semantics (§5.1). Used per invalid candidate through a *candidate proposal*: attempt 0 proposes `candidate.design` unchanged; later attempts delegate to a repair strategy that receives the previous `ValidationReport` and ends at `baseline_proposal`. Its result is a validated dict; the pipeline wraps it in a new `LayoutCandidate` that keeps `family`, `seed` and `generator_version` and has its own `candidate_id` (U5). |
 | Rank | `rank_candidates` (§6.4) | Sees only validated candidates. |
@@ -477,7 +481,7 @@ not established. "Enforced" = checked by `validate_candidate` today.
 | K3 | Every source ID appears exactly once; nothing added or removed; no duplicate IDs | Official | Yes (policy) | schema `id` description; RULES.md; FAQ Q1 |
 | K4 | Output element order equals the source's flat array order | Internal | Yes (policy) | not stated by Adobe; whether it is required is not established |
 | K5 | Per-type required fields and enum/type/nullability validity (text: content, font_family, font_size, color; image: asset_id; shape: shape_type, fill_color) | Official | Yes (schema parse) | schema `allOf` |
-| K6 | Allowed changes: `x`, `y`, `width`, `height` on every element and `font_size` on text elements. **Everything else is frozen** — `type`, `content`, `font_family`, `font_weight`/`style`, `text_align`, `line_height`, `letter_spacing`, `max_lines`, `style_runs`, `color`, `fill_color`, stroke fields, `corner_radius`, `asset_id`, `fit`, `rotation`, `opacity`, `z_index`, `group_id`, and all extension properties, including optional-field presence/`null` and numeric types | Official for `content`, `font_family` (stage one, RULES.md "Adaptive typography") and `asset_id` (no regeneration, RULES.md); **Internal** for all other frozen fields | Yes (policy) | Whether Adobe permits changing e.g. `rotation` or `opacity` is **Unresolved** (U1); the validator forbids it |
+| K6 | Allowed changes: `x`, `y`, `width`, `height` on every element and `font_size` on text elements. **Everything else is frozen** — `type`, `content`, `font_family`, `font_weight`/`style`, `text_align`, `line_height`, `letter_spacing`, `max_lines`, `style_runs`, `color`, `fill_color`, stroke fields, `corner_radius`, `asset_id`, `fit`, `rotation`, `opacity`, `z_index`, `group_id`, and all extension properties, including optional-field presence/`null` and numeric types | Official for `content`, `font_family` (stage one, RULES.md "Adaptive typography") and `asset_id` (no regeneration, RULES.md); **Internal** for all other frozen fields | Yes (policy) | Whether Adobe permits changing e.g. `rotation` or `opacity` is **Unresolved** (U1); the validator forbids it. Text, fill and stroke colors are protected by the project's Stage-1 requirement (§8.1.6) and, as a rubric quality, by Brief §2.5 ("colours, fonts, and the logo survive the resize intact"). `mutable_fields` in `engine/candidate_validator.py` is this list in code; the validator and the generator helper both use it |
 | K7 | `font_size` ≥ 1 | Official | Yes (schema parse) | schema minimum |
 | K8 | Every element lies inside the target canvas, measured as the union of the stored box and its rotated bounding box, expanded by half the stroke width (`stroke_width/2·(|cos|+|sin|)`) for shapes with a non-null `stroke_color`; no tolerance (strict `<0`, `>W`, `>H`) | "Nothing off-canvas" is Official (RULES.md; `resize.py`); **the measurement above is Internal**; the official definition (rotation, stroke, tolerance, intentional bleed) is **Unresolved** (U1) | Yes (geometry) | `element_bounds`, `candidate_validator.py:25` |
 | K9 | Non-`cover` images with positive-area source and candidate boxes keep their box ratio: `|(w_c·h_s)/(h_c·w_s) − 1| ≤ 1/20`. Source `fit` is read with its effective default (`contain`). No full-bleed exemption is inferred from geometry, appearance or ID | "Kept in proportion" is Official (RULES.md); the **5 % figure** appears only in the supplied `resize.py` docstring ("within ~5 %", full-bleed/`fit:"cover"` exempt); the exact official definition is **Unresolved** (U1) | Yes (geometry) | |
@@ -536,6 +540,54 @@ element, D.1.3); sharing an explicit group strengthens the evidence. Numeric thr
 must be tuned on the three fixtures and human labels before use. Where the evidence is ambiguous the pair is
 not scored.
 
+#### 8.1.6 Stage-1 design-property preservation (project requirement)
+
+The project states that in Stage 1 the engine may only reposition elements, resize them (images subject to
+aspect-ratio constraints), adjust text font size, and reflow text by changing its bounding box; it must not
+change colors (fills, strokes, text), font families, text content, image asset references or pixel content,
+element identifiers or the element count; and both the learned model and the computational fallback must
+enforce this. Color distribution, contrast and visual hierarchy may influence optimization, but improvements
+must come from positioning, sizing and arrangement, never recoloring. The statement is recorded here as a
+requirement of this project; it was not found verbatim in RULES.md, FAQ.md or the brief. Official support: RULES.md
+("Adaptive typography and copy": content and font family fixed; "regenerating image content": assets), Brief §2.5
+(colours and fonts survive intact).
+
+This section maps the statement onto the constraint table; the field list itself lives only in K6.
+
+| Statement | Constraint | Enforced by `validate_candidate` today |
+| --- | --- | --- |
+| Reposition (`x`, `y`) | K6 | Yes |
+| Resize (`width`, `height`), images subject to aspect ratio | K6, K9 | Yes; the 5 % figure and its exemption are U1 |
+| Adjust text font size | K6, K7 | Yes, text elements only (`font_size` on a shape is rejected) |
+| Reflow text by changing its bounding box | K6 | Yes: `text_align`, `line_height`, `letter_spacing`, `max_lines` and `style_runs` stay frozen, so reflow happens only through the box and `font_size` |
+| Protected: colors (text `color`, `fill_color`, `stroke_color`; `stroke_width` with them) | K6 | Yes |
+| Protected: font families, text content | K6 | Yes |
+| Protected: asset references; pixel content | K6, K14 | References yes; pixels are never touched by the engine and are not machine-checked |
+| Protected: identifiers and element count | K3, K4 | Yes |
+
+K6 also freezes fields the statement does not name (`rotation`, `opacity`, `z_index`, `fit`, `group_id`, extensions).
+Whether Adobe itself allows changing some of them remains U1.
+
+**Both paths, one gate.** Neither the GNN ranker nor the deterministic scorer builds or edits a design; both only order
+candidates. "Both must enforce" is therefore met by the single gate: every candidate passes `validate_candidate`
+before ranking (§8.1.3) and the selected design is revalidated before serialization (§6.4). A score never overrides a
+failed check.
+
+**Status (2026-10-28; run with the commands in [CI.md](CI.md)).**
+
+- **The gate.** `validate_candidate` accepts changes to the five K6 fields and rejects every protected change. `tests/test_layout_search.py` names text, fill and stroke color, stroke width, stroke removal and null stroke, opacity, rotation, `z_index` and `font_size` on shapes and images, each asserting a policy-only report with the exact violation, and checks that permitted changes still pass. Earlier tests keep covering content, font family, asset reference, IDs, count, order, `group_id`, extension data and style runs.
+- **One definition in code.** `mutable_fields` (`engine/candidate_validator.py`) is K6 in code. A test patches it and shows the validator and the helper both follow it; another checks the helper against every property of the schema's element definition.
+- **Generator helper.** `layout_edit` (`engine/layout_edits.py`) deep-copies an Adobe element dict and applies only K6 fields; any other field, including `font_size` on a non-text element, raises `ProtectedFieldError`. It does not validate values: the validator stays the authority. `baseline_proposal` emits its elements only through it; its output was verified identical before and after this change on 112 cases (3 samples, 5 targets, 8 attempts). Its trial-scaling loops only measure and never emit a candidate, so they do not use it.
+- **Property tests.** `tests/test_layout_edits.py` covers the implemented baseline family on the three samples, three targets and eight attempts with an independent, type-exact, recursive comparison that excludes only the permitted fields: IDs, count and order preserved; only K6 fields differ; `font_size` changes only on text; protected data identical at any depth; no nested structure shared with the source; source unmodified; schema and policy always OK; repair attempts fully valid; the stretch attempt (attempt 0) at most geometry-invalid. A one-off mutation check, not committed, confirmed these tests fail when a generator recolors text, changes opacity or adds `font_size` to a non-text element, and when the validator's allowlist is widened.
+- **Deviation from the plan.** S02's `with_updates` and `with_layout` still do not exist (A.8). `layout_edit` works on Adobe element dicts, the representation `baseline_proposal` and `find_valid_layout` use, and is independent of S02, which stays structural-only (U12). A `Design`-level adapter can wrap it when S02's editing APIs exist.
+- **Both validation gates.** Today `resize` is `find_valid_layout(baseline_proposal)`: every proposal is validated before it can leave, and only the validated snapshot is returned (tested, including a proposer that keeps changing a protected field). No ranking or selection step exists, so the planned revalidation after selection (§6.4) has no code or test yet; it has not been weakened because it does not exist.
+
+**Still to do:**
+
+1. Property tests for each planned family (VERTICAL_STACK, HORIZONTAL_FLOW, TWO_COLUMN, HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY). Deferred because no code exists. When one is implemented it must build candidates through `layout_edit` and be registered in `FAMILIES` in `tests/test_layout_edits.py`.
+2. A test of the revalidation after selection, when ranking and selection exist.
+3. Contrast and visual hierarchy may enter scoring only through declared colors and sizes; no term is defined yet and none may inspect pixels or assets.
+
 ### 8.2 Cross-component invariants
 
 1. Source designs and caller-owned dicts are never mutated; exported JSON is a fresh tree.
@@ -588,7 +640,8 @@ Criteria for a change to be merge-ready, by component. Items marked (planned) ha
 - **Graph:** N=1 → one node and zero edges; N=4 → 12 directed edges; N=17 → 272; duplicate IDs rejected upstream; `group_id` of `None`, `ABSENT` and `""` yield correct `same_explicit_group`; negative `x/y`, zero width/height and rotated boxes give finite features and no mutation; reverse-edge relative displacements have opposite signs; every candidate of one source shares ID order and topology; output tensor shapes and dtypes exactly as in B.1.
 - **graph_v4:** its first 57 node and 31 edge columns equal `graph_v3` on all three samples; shapes `[N,58]`/`[E,32]`; hand-computed text-fit values and size-order signs; font-size-only edits change exactly columns 53, 54, 57 (and edge 31); zero off text and for degenerate boxes; extreme font sizes stay finite; the sparse topology carries the extra edge column; unsupported versions are rejected; `engine/text_fit.py` imports no PyTorch.
 - **Model:** shape tests on CPU (and CUDA when available); deterministic evaluation with dropout off; no NaN on all-zero embeddings; batched graphs keep separate pooling; checkpoint dimension/version mismatch rejected; numeric-only checkpoints behave as C.2; returned attention is never exposed as importance.
-- **Output gate:** invalid-to-valid retries with diagnostics; exhaustion raises without emitting a draft; malformed schemas; frozen-field and extension changes; ID/order; bounds, rotation and strokes; image ratios; degeneracy; all three samples (`tests/test_layout_search.py`).
+- **Output gate:** invalid-to-valid retries with diagnostics; text, fill and stroke color, stroke width, stroke removal, opacity, rotation, `z_index` and `font_size` on a non-text element each rejected with a policy-only report (§8.1.6); exhaustion raises without emitting a draft; malformed schemas; frozen-field and extension changes; ID/order; bounds, rotation and strokes; image ratios; degeneracy; all three samples (`tests/test_layout_search.py`).
+- **Generator edits (implemented, baseline family only):** `layout_edit` accepts exactly the K6 fields and rejects every other schema field; property tests on the three samples (§8.1.6). Property tests for the planned families are deferred until those families exist.
 - **Generator (planned):** every candidate preserves ID count/order and frozen fields and has the target canvas; text `font_size` is searched together with boxes (a test that fails if a family never varies `font_size`, and one that rejects a `font_size` below 1); each family runs on warm-up/core/advanced samples; no candidate is accepted if it violates a known rule; intentional background overlaps are not globally forbidden; infeasible layouts are not falsely passed; diversity returns ≤ 3 options and no exact duplicates.
 - **Preference UI (planned):** reversed display order does not invert canonical labels; same source and target in a comparison; no score leakage; tie/both-bad/skip recorded; repeats retained; labels survive restart; append-only storage with renderer/generator versions.
 - **Evaluation (planned):** no source ID leaks across splits; report dataset sizes by source; compare the MLP and GNN to the deterministic baseline; final output comparison uses held-out designs.
@@ -623,7 +676,7 @@ approval. **Open (Adobe)**: depends on information Adobe has not given; do not c
 
 | ID | Decision | Status | Where |
 | --- | --- | --- | --- |
-| U1 | Official definitions of off-canvas (rotation, stroke, tolerance, intentional bleed), image-proportion tolerance and its full-bleed exception, and whether fields other than `content`/`font_family`/`asset_id` (for example `rotation`, `opacity`, `z_index`) may change. The validator is currently stricter than the official text | **Open (Adobe)** | K6, K8, K9; Appendix F |
+| U1 | Official definitions of off-canvas (rotation, stroke, tolerance, intentional bleed), image-proportion tolerance and its full-bleed exception, and whether fields other than `content`/`font_family`/`asset_id` (for example `rotation`, `opacity`, `z_index`) may change. The validator is currently stricter than the official text; the project's own Stage-1 requirement (§8.1.6) permits only position, size and font-size changes, but Adobe's official position is unconfirmed | **Open (Adobe)** | K6, K8, K9; Appendix F |
 | U2 | `generate_candidates` returns `list[LayoutCandidate]`; `find_valid_layout` stays the iterative validation/repair loop; generation, validation/repair and ranking are separate. `LayoutConfig` fields and the composition flow | **Direction set** | §5.4 |
 | U3 | Deterministic scorer on validated candidates only, primary until the GNN is trained, fallback when it fails. Signature, exception mapping, meaning of a missing score. Term definitions and **provisional** weights are in D.1.5 (untested, not final); calibration in D.1.6 | **Direction set**; interface and weights are recommendations awaiting calibration | §6.2, §6.4, D.1.5, D.1.6 |
 | U4 | Final names of the selection function and the multi-option entry point | **Recommended** | §10.3 |
