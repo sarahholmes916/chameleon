@@ -11,10 +11,17 @@ from collections.abc import Sequence
 from typing import Any
 
 from engine.candidate_generator import (
+    FAMILY_ASPECT_CUTOFF,
+    FAMILY_BANNER_ZONES,
+    FAMILY_HERO_LEFT,
+    FAMILY_HERO_RIGHT,
     FAMILY_HORIZONTAL_FLOW,
     FAMILY_SCALE_BASELINE,
     FAMILY_VERTICAL_STACK,
+    banner_zones_candidates,
     baseline_candidate,
+    hero_left_candidates,
+    hero_right_candidates,
     horizontal_flow_candidates,
     vertical_stack_candidates,
 )
@@ -31,6 +38,9 @@ _FAMILY_RANK = {
     FAMILY_SCALE_BASELINE: 0,
     FAMILY_HORIZONTAL_FLOW: 1,
     FAMILY_VERTICAL_STACK: 2,
+    FAMILY_HERO_LEFT: 3,
+    FAMILY_HERO_RIGHT: 4,
+    FAMILY_BANNER_ZONES: 5,
 }
 
 
@@ -42,11 +52,16 @@ def _best_index(scores: Sequence[float], family_ranks: Sequence[int]) -> int:
 
 def _select_batch_candidate(design: Design, target: Canvas) -> dict[str, Any] | None:
     """Best validated batch candidate, or None when the batch yields nothing."""
-    batches = (
+    batches = [
         (FAMILY_SCALE_BASELINE, [baseline_candidate(design, target)]),
         (FAMILY_HORIZONTAL_FLOW, horizontal_flow_candidates(design, target)),
         (FAMILY_VERTICAL_STACK, vertical_stack_candidates(design, target)),
-    )
+        (FAMILY_HERO_LEFT, hero_left_candidates(design, target)),
+        (FAMILY_HERO_RIGHT, hero_right_candidates(design, target)),
+    ]
+    if target.width / target.height > FAMILY_ASPECT_CUTOFF:
+        batches.append(
+            (FAMILY_BANNER_ZONES, banner_zones_candidates(design, target)))
     shortlisted: list[tuple[int, int, dict[str, Any]]] = []
     for family, candidates in batches:
         for position, candidate in enumerate(candidates):

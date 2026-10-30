@@ -594,7 +594,7 @@ failed check.
 
 **Still to do:**
 
-1. Property tests for each planned family (VERTICAL_STACK, HORIZONTAL_FLOW, TWO_COLUMN, HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY). Deferred because no code exists. When one is implemented it must build candidates through `layout_edit` and be registered in `FAMILIES` in `tests/test_layout_edits.py`.
+1. Property tests for each planned family: VERTICAL_STACK, HORIZONTAL_FLOW, HERO_LEFT, HERO_RIGHT and BANNER_ZONES are implemented, build through `layout_edit`, and registered in `FAMILIES` in `tests/test_layout_edits.py`. Still deferred for lack of code: TWO_COLUMN, CONTROLLED_OVERLAY. When one is implemented it must build candidates through `layout_edit` and be registered in `FAMILIES`.
 2. A test of the revalidation after selection, when ranking and selection exist.
 3. Contrast and visual hierarchy may enter scoring only through declared colors and sizes; no term is defined yet and none may inspect pixels or assets.
 

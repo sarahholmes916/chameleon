@@ -1,6 +1,6 @@
 """Deterministic soft objective for S04 candidate layouts (spec D.1.5).
 
-Nine-term weighted penalty J(L) over a (source, candidate, target) triple;
+Ten-term weighted penalty J(L) over a (source, candidate, target) triple;
 lower is better. Weights and constants are the spec's PROVISIONAL starting
 values (D.1.6): untested, not final, and not a validated aesthetic metric.
 Any change to a weight, constant, or term definition must bump
@@ -34,6 +34,9 @@ Mechanical readings adopted where D.1.5 under-specifies (all deterministic):
   per-object cap but gives no value.
 - Inputs that would make a logarithm undefined (zero/underflowed ratios)
   score 1.0 for that comparison, never NaN.
+- E_cover is one minus the union area of candidate boxes for
+  source-non-background-like elements over the target area (coordinate
+  compression; an empty eligible set covers nothing and scores 1).
 """
 
 from __future__ import annotations
@@ -75,6 +78,7 @@ __all__ = [
     "SPACE_GAP_SMOOTHING",
     "WEIGHT_ALIGN",
     "WEIGHT_BALANCE",
+    "WEIGHT_COVER",
     "WEIGHT_GROUP",
     "WEIGHT_MOVE",
     "WEIGHT_PAIR",
@@ -93,18 +97,21 @@ _logger = logging.getLogger(__name__)
 
 # Version of the weights, constants, and term definitions below. Bump on any
 # change (D.1.6 step 5). Provisional until calibrated against human labels.
-OBJECTIVE_VERSION = "objective_v1_provisional"
+OBJECTIVE_VERSION = "objective_v2_cover"
 
-# Provisional nine-term weights (D.1.5, sum 1.0). Untested starting values.
-WEIGHT_MOVE = 0.05
-WEIGHT_ALIGN = 0.075
-WEIGHT_PAIR = 0.125
-WEIGHT_SCALE = 0.075
-WEIGHT_UNWANTED_OVERLAP = 0.125
-WEIGHT_BALANCE = 0.05
-WEIGHT_READ = 0.25
-WEIGHT_GROUP = 0.20
-WEIGHT_SPACE = 0.05
+# Provisional ten-term weights (D.1.5, sum 1.0). The nine v1 weights are each
+# multiplied by 0.9 (relative proportions unchanged, mirroring the D.1.5
+# halving precedent); coverage takes the freed 0.10. Untested starting values.
+WEIGHT_MOVE = 0.045
+WEIGHT_ALIGN = 0.0675
+WEIGHT_PAIR = 0.1125
+WEIGHT_SCALE = 0.0675
+WEIGHT_UNWANTED_OVERLAP = 0.1125
+WEIGHT_BALANCE = 0.045
+WEIGHT_READ = 0.225
+WEIGHT_GROUP = 0.18
+WEIGHT_SPACE = 0.045
+WEIGHT_COVER = 0.10
 
 # E_align: source anchor agreement tolerance and candidate deviation scale.
 ALIGN_SOURCE_TOLERANCE = 0.02
@@ -144,12 +151,13 @@ class ObjectiveWeights:
     read: float = WEIGHT_READ
     group: float = WEIGHT_GROUP
     space: float = WEIGHT_SPACE
+    cover: float = WEIGHT_COVER
 
     def __post_init__(self) -> None:
         values = (
             self.move, self.align, self.pair, self.scale,
             self.unwanted_overlap, self.balance, self.read,
-            self.group, self.space,
+            self.group, self.space, self.cover,
         )
         if not all(math.isfinite(value) for value in values):
             raise ValueError("objective weights must be finite")
@@ -173,6 +181,7 @@ class TermScores:
     read: float
     group: float
     space: float
+    cover: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +241,8 @@ def evaluate_objective(
                        source_width, source_height,
                        target_width, target_height),
         space=_e_space(matched, source.source_canvas, target),
+        cover=_e_cover(matched, source.source_canvas,
+                       target_width, target_height),
     )
     total = (
         active.move * terms.move + active.align * terms.align
@@ -239,6 +250,7 @@ def evaluate_objective(
         + active.unwanted_overlap * terms.unwanted_overlap
         + active.balance * terms.balance + active.read * terms.read
         + active.group * terms.group + active.space * terms.space
+        + active.cover * terms.cover
     )
     return ObjectiveScore(terms=terms, total=total, weights=active,
                           objective_version=OBJECTIVE_VERSION)
@@ -678,3 +690,49 @@ def _e_space(matched: list[tuple[Element, Element]], source_canvas: Canvas,
     mean_gap = sum(gaps) / len(gaps)
     variance = sum((gap - mean_gap) ** 2 for gap in gaps) / len(gaps)
     return min(1.0, math.sqrt(variance) / (mean_gap + SPACE_GAP_SMOOTHING))
+
+
+def _union_area(boxes: list[tuple[float, float, float, float]]) -> float:
+    """Exact union area of axis-aligned boxes via coordinate compression."""
+    spans = [(x, x + width, y, y + height)
+             for x, y, width, height in boxes
+             if width > 0 and height > 0]
+    if not spans:
+        return 0.0
+    xs = sorted({edge for span in spans for edge in span[:2]})
+    ys = sorted({edge for span in spans for edge in span[2:]})
+    area = 0.0
+    for left, right in zip(xs, xs[1:]):
+        for top, bottom in zip(ys, ys[1:]):
+            if any(zone_left <= left and right <= zone_right
+                   and zone_top <= top and bottom <= zone_bottom
+                   for zone_left, zone_right, zone_top, zone_bottom in spans):
+                area += (right - left) * (bottom - top)
+    return area
+
+
+def _e_cover(matched: list[tuple[Element, Element]], source_canvas: Canvas,
+             target_width: float, target_height: float) -> float:
+    """One minus the covered fraction of the target canvas.
+
+    Coverage is the union area of candidate boxes for elements that are not
+    background-like in the source, over the target area. Area-weighting means
+    tiny elements barely register (no gaming by count); the union (not the
+    sum) means overlaps never double-count. An empty eligible set covers
+    nothing and scores 1.
+    """
+    target_area = target_width * target_height
+    if target_area <= 0:
+        return 1.0
+    boxes = []
+    for original, proposed in matched:
+        if is_background_like(original, source_canvas):
+            continue
+        left = min(max(float(proposed.x), 0.0), target_width)
+        top = min(max(float(proposed.y), 0.0), target_height)
+        right = min(max(float(proposed.x) + float(proposed.width), 0.0),
+                    target_width)
+        bottom = min(max(float(proposed.y) + float(proposed.height), 0.0),
+                     target_height)
+        boxes.append((left, top, right - left, bottom - top))
+    return _clip01(1.0 - _union_area(boxes) / target_area)

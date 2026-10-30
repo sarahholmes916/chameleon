@@ -6,10 +6,10 @@ drift of the production allowlist, or any generator that edits a protected field
 
 Implemented candidate families: the proportional baseline (`baseline_proposal`: attempt 0 is the
 stretch, attempts 1+ fit the composition uniformly) plus HORIZONTAL_FLOW and VERTICAL_STACK
-(one candidate per group mode, all fully valid). Planned families (TWO_COLUMN,
-HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY; Appendix D.1.2) have no code, so their property
-tests are deferred: register each one in FAMILIES below when it is implemented. No placeholder family
-or skipped test stands in for them.
+(one candidate per group mode, all fully valid) plus HERO_LEFT, HERO_RIGHT (order/corner variants,
+all fully valid) and BANNER_ZONES (modes x orders x small-variants, all fully valid). Planned
+families (TWO_COLUMN, CONTROLLED_OVERLAY; Appendix D.1.2): register each one in FAMILIES when
+implemented; no placeholder family or skipped test stands in for them.
 """
 
 import copy
@@ -21,6 +21,8 @@ import pytest
 from engine import candidate_validator, layout_edits
 from engine.candidate_generator import (
     banner_zones_candidates,
+    hero_left_candidates,
+    hero_right_candidates,
     horizontal_flow_candidates,
     vertical_stack_candidates,
 )
@@ -223,8 +225,25 @@ def zones_candidates(source, target):
             for n, candidate in enumerate(candidates)]
 
 
+def hero_l_candidates(source, target):
+    # (label, candidate, must_be_fully_valid): order x small-corner variants.
+    candidates = hero_left_candidates(source, target)
+    assert candidates
+    return [(f"heroL{n}", candidate, True)
+            for n, candidate in enumerate(candidates)]
+
+
+def hero_r_candidates(source, target):
+    candidates = hero_right_candidates(source, target)
+    assert candidates
+    return [(f"heroR{n}", candidate, True)
+            for n, candidate in enumerate(candidates)]
+
+
 FAMILIES = {"banner_zones": zones_candidates,
             "baseline": baseline_candidates,
+            "hero_left": hero_l_candidates,
+            "hero_right": hero_r_candidates,
             "horizontal_flow": flow_candidates,
             "vertical_stack": stack_candidates}
 

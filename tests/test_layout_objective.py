@@ -27,6 +27,7 @@ from engine.layout_objective import (
     SPACE_GAP_SMOOTHING,
     WEIGHT_ALIGN,
     WEIGHT_BALANCE,
+    WEIGHT_COVER,
     WEIGHT_GROUP,
     WEIGHT_MOVE,
     WEIGHT_PAIR,
@@ -92,14 +93,15 @@ def target_canvas(width, height):
 def terms_list(terms):
     return (terms.move, terms.align, terms.pair, terms.scale,
             terms.unwanted_overlap, terms.balance, terms.read,
-            terms.group, terms.space)
+            terms.group, terms.space, terms.cover)
 
 
 def test_provisional_weights_match_spec():
     assert (WEIGHT_MOVE, WEIGHT_ALIGN, WEIGHT_PAIR, WEIGHT_SCALE,
             WEIGHT_UNWANTED_OVERLAP, WEIGHT_BALANCE, WEIGHT_READ,
-            WEIGHT_GROUP, WEIGHT_SPACE) == (
-        0.05, 0.075, 0.125, 0.075, 0.125, 0.05, 0.25, 0.20, 0.05)
+            WEIGHT_GROUP, WEIGHT_SPACE, WEIGHT_COVER) == (
+        0.045, 0.0675, 0.1125, 0.0675, 0.1125, 0.045, 0.225, 0.18,
+        0.045, 0.10)
     assert (ALIGN_SOURCE_TOLERANCE, ALIGN_DEVIATION_SCALE,
             PAIR_SLACK, PAIR_DISTANCE_SCALE, SCALE_LOG_RANGE,
             SOURCE_OVERLAP_IOU_THRESHOLD, READ_REFERENCE_FONT_SIZE,
@@ -110,11 +112,11 @@ def test_provisional_weights_match_spec():
     assert PROVISIONAL_WEIGHTS == ObjectiveWeights()
     assert (WEIGHT_MOVE + WEIGHT_ALIGN + WEIGHT_PAIR + WEIGHT_SCALE
             + WEIGHT_UNWANTED_OVERLAP + WEIGHT_BALANCE + WEIGHT_READ
-            + WEIGHT_GROUP + WEIGHT_SPACE) == pytest.approx(1.0)
+            + WEIGHT_GROUP + WEIGHT_SPACE + WEIGHT_COVER) == pytest.approx(1.0)
 
 
-def test_objective_version_is_provisional():
-    assert OBJECTIVE_VERSION == "objective_v1_provisional"
+def test_objective_version_matches_cover_rebalance():
+    assert OBJECTIVE_VERSION == "objective_v2_cover"
 
 
 def test_weights_must_sum_to_one():
@@ -572,6 +574,47 @@ def test_space_merges_shared_groups():
     assert score.terms.space == 0.0
 
 
+def test_cover_hand_computed():
+    source = design(100, 100, [shape("a", 0, 0, 10, 10)])
+    moved = design(100, 100, [shape("a", 10, 0, 10, 10)])
+    score = evaluate_objective(source, moved, target_canvas(100, 100))
+    assert score.terms.cover == pytest.approx(1.0 - 100.0 / 10000.0)
+
+
+def test_cover_excludes_backgrounds():
+    plain = design(1000, 1000, [shape("a", 0, 400, 100, 100)])
+    with_bg = design(1000, 1000, [
+        shape("a", 0, 400, 100, 100),
+        shape("bg", 0, 0, 1000, 1000),
+    ])
+    assert is_background_like(with_bg.elements[1], with_bg.source_canvas)
+    target = target_canvas(1000, 1000)
+    assert evaluate_objective(with_bg, with_bg, target).terms.cover == \
+        evaluate_objective(plain, plain, target).terms.cover
+
+
+def test_cover_union_ignores_overlap():
+    source = design(100, 100, [
+        shape("a", 0, 0, 10, 10),
+        shape("b", 0, 0, 10, 10),
+    ])
+    score = evaluate_objective(source, source, target_canvas(100, 100))
+    assert score.terms.cover == pytest.approx(1.0 - 100.0 / 10000.0)
+
+
+def test_cover_tiny_elements_barely_register():
+    source = design(100, 100, [shape("a", 0, 0, 1, 1)])
+    score = evaluate_objective(source, source, target_canvas(100, 100))
+    assert score.terms.cover == pytest.approx(1.0 - 1.0 / 10000.0)
+
+
+def test_cover_empty_without_foreground():
+    source = design(1000, 1000, [shape("bg", 0, 0, 1000, 1000)])
+    assert is_background_like(source.elements[0], source.source_canvas)
+    score = evaluate_objective(source, source, target_canvas(1000, 1000))
+    assert score.terms.cover == 1.0
+
+
 def test_total_is_weighted_sum_of_terms():
     source = design(1000, 1000, [
         shape("a", 100, 100, 100, 100, group_id="g"),
@@ -596,6 +639,7 @@ def test_total_is_weighted_sum_of_terms():
         + PROVISIONAL_WEIGHTS.read * score.terms.read
         + PROVISIONAL_WEIGHTS.group * score.terms.group
         + PROVISIONAL_WEIGHTS.space * score.terms.space
+        + PROVISIONAL_WEIGHTS.cover * score.terms.cover
     )
     assert score.total == pytest.approx(expected)
 
@@ -605,7 +649,7 @@ def test_custom_weights_isolate_one_term():
     moved = design(100, 100, [shape("a", 10, 0, 10, 10)])
     weights = ObjectiveWeights(
         move=1.0, align=0.0, pair=0.0, scale=0.0, unwanted_overlap=0.0,
-        balance=0.0, read=0.0, group=0.0, space=0.0,
+        balance=0.0, read=0.0, group=0.0, space=0.0, cover=0.0,
     )
     score = evaluate_objective(source, moved, target_canvas(100, 100),
                                weights=weights)
@@ -736,7 +780,7 @@ def test_score_maps_from_objective_total():
     assert score_deterministic(source, [moved], target) == [pytest.approx(1.0 - total)]
     move_only = ObjectiveWeights(
         move=1.0, align=0.0, pair=0.0, scale=0.0, unwanted_overlap=0.0,
-        balance=0.0, read=0.0, group=0.0, space=0.0,
+        balance=0.0, read=0.0, group=0.0, space=0.0, cover=0.0,
     )
     single = evaluate_objective(source, moved, target, weights=move_only)
     assert score_deterministic(source, [moved], target, weights=move_only) == [

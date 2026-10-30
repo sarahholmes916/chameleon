@@ -9,7 +9,10 @@ import pytest
 
 import engine.resize as resize_module
 from engine.candidate_generator import (
+    banner_zones_candidates,
     baseline_candidate,
+    hero_left_candidates,
+    hero_right_candidates,
     horizontal_flow_candidates,
     vertical_stack_candidates,
 )
@@ -29,6 +32,9 @@ FAMILY_FUNCTIONS = (
     "baseline_candidate",
     "horizontal_flow_candidates",
     "vertical_stack_candidates",
+    "hero_left_candidates",
+    "hero_right_candidates",
+    "banner_zones_candidates",
 )
 
 
@@ -103,8 +109,39 @@ def test_core_winner_is_not_baseline():
     output = resize(task["source"], task["target_canvas"])
     assert output != baseline_candidate(source, target)
     contenders = (horizontal_flow_candidates(source, target)
-                  + vertical_stack_candidates(source, target))
+                  + vertical_stack_candidates(source, target)
+                  + hero_left_candidates(source, target)
+                  + hero_right_candidates(source, target)
+                  + banner_zones_candidates(source, target))
     assert output in contenders
+
+
+def test_core_winner_is_hero_right_variant_two():
+    task, source, target = load_task("chameleon_sample_level2_core.json")
+    output = resize(task["source"], task["target_canvas"])
+    assert output == hero_right_candidates(source, target)[2]
+
+
+def test_zones_skipped_below_aspect_cutoff(monkeypatch):
+    task, _, _ = load_task("chameleon_sample_level1_warmup.json")
+    calls = []
+    monkeypatch.setattr(
+        resize_module, "banner_zones_candidates",
+        lambda *args, **kwargs: calls.append(args) or [])
+    output = resize(task["source"], task["target_canvas"])
+    assert calls == []
+    assert set(output.keys()) == {"canvas", "elements"}
+
+
+def test_zones_generated_above_aspect_cutoff(monkeypatch):
+    task, _, _ = load_task("chameleon_sample_level2_core.json")
+    calls = []
+    real = resize_module.banner_zones_candidates
+    monkeypatch.setattr(
+        resize_module, "banner_zones_candidates",
+        lambda *args, **kwargs: calls.append(args) or real(*args, **kwargs))
+    resize(task["source"], task["target_canvas"])
+    assert len(calls) == 1
 
 
 def test_best_index_prefers_family_rank_on_exact_ties():

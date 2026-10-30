@@ -88,17 +88,17 @@ Never add `NoOverlap2D` over every element. Background and decorative layers oft
 First satisfy the hard constraints of spec §8.1. Among valid layouts minimize:
 
 \[
-J(L)=w_m E_{move}+w_a E_{align}+w_p E_{pair}+w_s E_{scale}+w_o E_{unwanted-overlap}+w_b E_{balance}+w_r E_{read}+w_g E_{group}+w_{sp} E_{space}
+J(L)=w_m E_{move}+w_a E_{align}+w_p E_{pair}+w_s E_{scale}+w_o E_{unwanted-overlap}+w_b E_{balance}+w_r E_{read}+w_g E_{group}+w_{sp} E_{space}+w_c E_{cover}
 \]
 
-The first six terms are defined below. The last three (`E_read`, `E_group`, `E_space`) are defined after them.
+The first six terms are defined below. The last four (`E_read`, `E_group`, `E_space`, `E_cover`) are defined after them.
 
-**Provisional starting weights (untested; not final; calibrate per D.1.6).** With all nine terms,
-`[w_m,w_a,w_p,w_s,w_o,w_b,w_r,w_g,w_sp] = [0.05,0.075,0.125,0.075,0.125,0.05,0.25,0.20,0.05]` (sum 1.0). The six
-original weights `[0.10,0.15,0.25,0.15,0.25,0.10]` are each multiplied by 0.5, so their relative proportions are
-unchanged; the other half of the weight goes to readability (0.25, the largest single weight because the rendered
+**Provisional starting weights (untested; not final; calibrate per D.1.6).** With all ten terms,
+`[w_m,w_a,w_p,w_s,w_o,w_b,w_r,w_g,w_sp,w_c] = [0.045,0.0675,0.1125,0.0675,0.1125,0.045,0.225,0.18,0.045,0.10]` (sum 1.0). The six
+original weights `[0.10,0.15,0.25,0.15,0.25,0.10]` were each multiplied by 0.5 when the second wave joined, and the nine v1 weights are now each multiplied by 0.9, so relative proportions are
+unchanged; coverage takes the freed 0.10 while readability stays first (0.225, because the rendered
 PNG is judged on legibility, RULES.md:18 and Brief §2.5, and no other term measures it),
-group cohesion (0.20, because the schema describes a group as a unit that travels together) and spacing (0.05,
+group cohesion (0.18, because the schema describes a group as a unit that travels together) and spacing (0.045,
 the weakest and noisiest evidence). If only the original six terms are implemented, use the original six-term
 vector. Tune on held-out human preferences. Each term is averaged over its eligible set and bounded to `[0,1]`, so weights are comparable:
 
@@ -141,6 +141,7 @@ A text element with `w_c <= 0` or `h_c <= 0` counts as fully overflowing for `E_
   whose source boxes overlap (IoU above 0.02) or where one contains the other, join one block (union box). With
   fewer than three blocks the term is 0. Order blocks along the target's longer axis by candidate center; with
   `g_k = max(0, start_{k+1} − end_k) / L_axis` the normalized gaps, `E_space = min(1, std(g) / (mean(g) + 0.01))`.
+`E_cover` (canvas coverage): eligible = elements that are not background-like (D.1.3), read from the source. With `U` the union area of candidate boxes over the target area `A`, `E_cover = 1 − U/A`, clipped to `[0,1]`. Area-weighting means tiny elements barely register and the union never double-counts overlaps, so neither corner confetti nor stacked duplicates can game it; an empty eligible set scores 1.
 
 **Overlap.** `E_unwanted-overlap` is the only overlap term and keeps its eligibility rules above, which already
 exclude same-group pairs, containment pairs, source-overlapping pairs and background-like elements, so intentional
