@@ -194,7 +194,7 @@ Still pending: human preference judgements on stretched vs proportional layouts 
 
 Implemented: bounded deterministic post-stretch local refinement (`engine/layout_refinement.py`, D.1.8) integrated into the
 candidate pool with separate budgets and provenance; objective v5 (worst-text readability share, ungrouped containment);
-`s04_word_fit_v2` calibrated against the real renderer; three-way before/after benchmark (`scripts/evaluate_s04.py`).
+`s04_word_fit_v3` calibrated against the real renderer; three-way before/after benchmark (`scripts/evaluate_s04.py`).
 Tests: `tests/test_layout_refinement.py` (core), renderer-backed text-fit tests in `tests/test_s04_rendering.py`.
 Evidence and limits: [S04_EVALUATION.md](S04_EVALUATION.md). No graph feature, ranker, checkpoint or label change.
 Still pending: human preference comparisons of baseline/stretched/refined layouts and calibration of every new constant.

@@ -81,7 +81,7 @@ Objective is `objective_v6_relations_blank`. Shape stretching (`engine/shape_rol
 derives `label_fit`, `panel_fill`, `axis_x`, `axis_y` and `balanced` variants from the best valid layouts; the
 proportional layout stays in the pool and the scorer, not a preference for stretching, picks the winner.
 Post-stretch local refinement (`engine/layout_refinement.py`, D.1.8) then improves the best valid layouts that show a
-problem; refined candidates are extra pool records with parent/operator/score provenance, text-fit is `s04_word_fit_v2`,
+problem; refined candidates are extra pool records with parent/operator/score provenance, text-fit is `s04_word_fit_v3`,
 and the objective is `objective_v6_relations_blank`.
 See [S04 evaluation](S04_EVALUATION.md) for budgets, limitations, commands and evidence.
 

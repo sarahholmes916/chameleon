@@ -224,7 +224,7 @@ evaluation was performed. Every score is the provisional deterministic objective
 | Bounded local search, 12 operators, tiers, invariants | `engine/layout_refinement.py` (new) |
 | Pool integration, separate budgets, provenance, refinement log | `engine/candidate_pool.py` |
 | Objective v5: worst-text readability share; ungrouped containment | `engine/layout_objective.py` |
-| Word-fit v2: 1.4 em line, 3% advance safety, shared `SINGLE_LINE_EM` | `engine/layout_typography.py`, `engine/shape_stretch.py` |
+| Word-fit v3: 1.4 em line, 8% advance safety, shared `SINGLE_LINE_EM` | `engine/layout_typography.py`, `engine/shape_stretch.py` |
 | Three-way benchmark, quality metrics, lineage galleries | `scripts/evaluate_s04.py` |
 | Tests | `tests/test_layout_refinement.py` (new, core), `tests/test_s04_rendering.py` (renderer), updated `test_layout_objective.py`, `test_candidate_pool.py`, `test_shape_stretch.py` |
 | CI wiring | `scripts/ci_tests.py`, `.github/workflows/ci.yml` |

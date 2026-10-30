@@ -286,10 +286,10 @@ unchanged. `fill_space` (tier 3) is the matching refinement operator: it scales 
 (ratios 1.15, 1.35, 1.6, 2.0, or the largest that fits the canvas), fonts included but never above the source size,
 keeping the unit's internal layering and alignment; `_resolve` pushes neighbors aside. All constants are provisional.
 
-**Text-fit calibration** (`s04_word_fit_v2`): the production word-fit used 1.3 em per line; the real renderer measures
-1.36 to 1.41 em, which caused 1 to 2px height misses (76px needed in a 75px box). It is now 1.4 em with a 3% advance safety
+**Text-fit calibration** (`s04_word_fit_v3`): the production word-fit used 1.3 em per line; the real renderer measures
+1.36 to 1.41 em, which caused 1 to 2px height misses (76px needed in a 75px box). It is now 1.4 em with an 8% advance safety (v3; the Linux CI renderer measured small bold text up to ~6.6% wider than Windows)
 factor, shared by stretching and refinement through `SINGLE_LINE_EM`. `tests/test_s04_rendering.py` checks the estimate
-against actual rendered text and that pool winners fit under the renderer (except at the 1px schema floor, where no box can
+against actual rendered text and that pool winners fit under the renderer (except below 2px, where the renderer draws 1px text and no box can
 hold text). The production path stays renderer-free; measurement is an injected development/benchmark option.
 
 **Known limits.** Not implemented: restricted swaps or region shifts; moving a text block as a whole to make room beyond

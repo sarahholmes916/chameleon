@@ -2,15 +2,16 @@
 import copy
 import math
 
-TYPOGRAPHY_VERSION = "s04_word_fit_v2"
+TYPOGRAPHY_VERSION = "s04_word_fit_v3"
 # Height of the first line in ems. v1 used 1.3; the official renderer measures 1.36-1.41 em
 # (ascent + descent of the font at the truncated integer size), which made 1-2px height misses
 # (e.g. 76px needed, 75px box). Calibrated against renderer measurements in
 # tests/test_s04_rendering.py; still an estimate, never a glyph-exact guarantee.
 SINGLE_LINE_EM = 1.4
-# Safety factor on summed glyph advances (v1: none); the renderer's widths exceeded the estimate
-# by up to ~3% on bold/mixed text.
-ADVANCE_SAFETY = 1.03
+# Safety factor on summed glyph advances (v1: none). The renderer's widths exceeded the estimate
+# by ~3% on Windows and by up to ~6.6% for small bold text on Linux (Skia hinting at ~10px, found
+# by the GitHub runner), so 1.08 keeps the estimate from under-measuring on both.
+ADVANCE_SAFETY = 1.08
 
 
 def estimated_fit(element):
