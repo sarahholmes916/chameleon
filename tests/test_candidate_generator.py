@@ -34,6 +34,7 @@ from engine.candidate_generator import (
     SLOT_SAFETY_FACTOR,
     SMALL_ANCHOR_MAX_FRACTION,
     STACK_MAX_SINGLE_COLUMN_UNITS,
+    TYPE_SCALE_TOLERANCE,
     Slot,
     _is_fill_member,
     _merge_text_blocks,
@@ -246,11 +247,19 @@ def test_family_slot_order_differs_by_direction():
     source, target = load_sample("chameleon_sample_level2_core.json")
     flow = boxes_by_id(horizontal_flow_candidates(source, target)[0])
     stack = boxes_by_id(vertical_stack_candidates(source, target)[0])
-    assert flow["logo"]["x"] == pytest.approx(800.0)
+    slot_w = 1600 * (1 - 2 * MARGIN_FRACTION) / 4
+    band_h = (400 * (1 - MARGIN_FRACTION * (1 + SAFE_BOTTOM_MARGIN_FACTOR))
+              * (1 - BAND_GAP_FRACTION) / 2)
+    flow_cap = slot_w / 900.0
+    flow_w = 320.0 * min(slot_w / 320.0, band_h / 110.0, flow_cap)
+    assert flow["logo"]["x"] == pytest.approx(
+        800.0 + (slot_w - flow_w) / 2, abs=1e-6)
     column_w = (1472.0 - 1472.0 * 0.05) / 2
     column_x = 64.0 + column_w + 1472.0 * 0.05
     row_h = 400 * (1 - MARGIN_FRACTION * (1 + SAFE_BOTTOM_MARGIN_FACTOR)) / 4
-    logo_w = 320.0 * min(column_w / 320.0, row_h / 110.0)
+    head_scale = min(column_w / 900.0, row_h / 140.0)
+    stack_cap = head_scale
+    logo_w = 320.0 * min(column_w / 320.0, row_h / 110.0, stack_cap)
     assert stack["logo"]["x"] == pytest.approx(
         column_x + (column_w - logo_w) / 2, abs=1e-6)
     assert stack["logo"]["x"] != pytest.approx(flow["logo"]["x"])
@@ -960,6 +969,127 @@ def test_hierarchy_ratios_capped_on_core():
             assert placed[text_id]["font_size"] <= (
                 size / sizes[largest_id] * top
                 * (1 + FONT_RATIO_TOLERANCE))
+
+
+def test_button_width_capped_to_headline_proportion_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    by_id = source.elements_by_id
+    head_src_w = float(by_id["headline"].width)
+    ratios = {}
+    for shape_id, label_id in (("badge_bg", "badge_label"),
+                               ("cta_bg", "cta_label")):
+        pill_src_w = max(float(by_id[shape_id].width),
+                         float(by_id[label_id].width))
+        ratios[shape_id] = pill_src_w / head_src_w
+    candidates = (hero_left_candidates(source, target)
+                  + banner_zones_candidates(source, target))
+    for candidate in candidates:
+        placed = boxes_by_id(candidate)
+        head_w = placed["headline"]["width"]
+        for shape_id, ratio in ratios.items():
+            assert placed[shape_id]["width"] <= (
+                ratio * head_w * (1 + TYPE_SCALE_TOLERANCE))
+
+
+def test_block_rows_keep_inner_gap_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    candidates = (hero_left_candidates(source, target)
+                  + banner_zones_candidates(source, target))
+    for candidate in candidates:
+        placed = boxes_by_id(candidate)
+        head, sub = placed["headline"], placed["subhead"]
+        gap = sub["y"] - (head["y"] + head["height"])
+        inner = BLOCK_INNER_GAP_EM * max(head["font_size"], sub["font_size"])
+        assert 0.0 <= gap <= inner * (1 + TYPE_SCALE_TOLERANCE)
+
+
+def test_anchored_marks_clear_of_texts_and_pills_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    candidates = (hero_left_candidates(source, target)
+                  + banner_zones_candidates(source, target))
+    for candidate in candidates:
+        placed = boxes_by_id(candidate)
+        mark = placed["logo"]
+        for other_id in TEXT_AND_PILL_IDS:
+            assert not boxes_overlap(mark, placed[other_id]), other_id
+
+
+def test_block_gap_smaller_than_gap_to_next_unit_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    families = [(hero_left_candidates(source, target), True),
+                (banner_zones_candidates(source, target), False)]
+    for candidates, vertical in families:
+        for candidate in candidates:
+            placed = boxes_by_id(candidate)
+            head, sub = placed["headline"], placed["subhead"]
+            inner_gap = sub["y"] - (head["y"] + head["height"])
+            if vertical:
+                rows = ("headline", "subhead", "badge_bg", "cta_bg")
+                above = [placed[row_id]["y"] + placed[row_id]["height"]
+                         for row_id in rows
+                         if (placed[row_id]["y"] + placed[row_id]["height"]
+                             <= head["y"])]
+                below = [placed[row_id]["y"] for row_id in rows
+                         if (placed[row_id]["y"]
+                             >= sub["y"] + sub["height"])]
+                assert above or below
+                if above:
+                    assert inner_gap < head["y"] - max(above)
+                if below:
+                    assert inner_gap < (min(below)
+                                        - (sub["y"] + sub["height"]))
+            else:
+                block_left = min(head["x"], sub["x"])
+                block_right = max(head["x"] + head["width"],
+                                  sub["x"] + sub["width"])
+                block_top = min(head["y"], sub["y"])
+                block_bottom = max(head["y"] + head["height"],
+                                   sub["y"] + sub["height"])
+                gaps = []
+                for row_id in ("logo", "product", "badge_bg", "cta_bg"):
+                    box = placed[row_id]
+                    if (box["y"] + box["height"] <= block_top
+                            or box["y"] >= block_bottom):
+                        continue
+                    if box["x"] >= block_right:
+                        gaps.append(box["x"] - block_right)
+                    elif box["x"] + box["width"] <= block_left:
+                        gaps.append(block_left - (box["x"] + box["width"]))
+                assert gaps
+                assert inner_gap < min(gaps)
+
+
+def test_stack_centers_between_marks_or_usable_edges_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    usable_top = target.height * MARGIN_FRACTION
+    usable_bottom = (target.height
+                     * (1 - MARGIN_FRACTION * SAFE_BOTTOM_MARGIN_FACTOR))
+    families = [(hero_left_candidates(source, target),
+                 ("headline", "subhead", "badge_bg", "cta_bg"), True),
+                (banner_zones_candidates(source, target),
+                 ("headline", "subhead", "badge_bg", "cta_bg",
+                  "logo", "product"), False)]
+    for candidates, rows, has_mark in families:
+        for candidate in candidates:
+            placed = boxes_by_id(candidate)
+            stack_top = min(placed[row_id]["y"] for row_id in rows)
+            stack_bottom = max(placed[row_id]["y"] + placed[row_id]["height"]
+                               for row_id in rows)
+            space_top, space_bottom = usable_top, usable_bottom
+            if has_mark:
+                mark = placed["logo"]
+                stack_left = min(placed[row_id]["x"] for row_id in rows)
+                stack_right = max(placed[row_id]["x"] + placed[row_id]["width"]
+                                  for row_id in rows)
+                overlaps = not (mark["x"] + mark["width"] <= stack_left
+                                or mark["x"] >= stack_right)
+                if overlaps:
+                    if mark["y"] + mark["height"] <= stack_top:
+                        space_top = mark["y"] + mark["height"]
+                    elif mark["y"] >= stack_bottom:
+                        space_bottom = mark["y"]
+            assert abs((stack_top - space_top)
+                       - (space_bottom - stack_bottom)) <= 1.0
 
 
 def test_overlay_without_image_target_stays_capped_and_disjoint():

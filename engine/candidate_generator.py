@@ -92,6 +92,7 @@ __all__ = [
     "PILL_ASPECT_TOLERANCE",
     "PILL_LABEL_PADDING_FRACTION",
     "PORTRAIT_ASPECT_CUTOFF",
+    "RESERVE_DUST_MARGIN_PX",
     "SAFE_BOTTOM_MARGIN_FACTOR",
     "SLOT_DIRECTION_HORIZONTAL",
     "SLOT_DIRECTION_VERTICAL",
@@ -101,7 +102,7 @@ __all__ = [
     "STACK_MAX_SINGLE_COLUMN_UNITS",
     "TEXT_BLOCK_GAP_FACTOR",
     "TEXT_LABEL_HEIGHT_EM",
-    "TEXT_ROW_PADDING_EM",
+    "TYPE_SCALE_TOLERANCE",
     "Slot",
     "allocate_slots",
     "banner_zones_candidates",
@@ -152,9 +153,17 @@ FONT_GROWTH_STEP = 1.1
 FONT_GROWTH_STEPS = 4
 FONT_GROWTH_CAP = 1.5
 FONT_SHRINK_STEP = 0.9
-# Slack on exact source-ratio font caps: float dust from seed/cap arithmetic
-# only, far below one ladder rung (10%), never a visible size step.
+# Measurement slack for exact source-ratio caps (tests only; the generator's
+# own caps are exact, so verification keeps the full margin for float
+# reassociation): far below one ladder rung (10%), never a visible step.
 FONT_RATIO_TOLERANCE = 1e-9
+# Measurement slack for exact geometric proportion caps (tests only; the
+# generator's own caps are exact): float-reassociation dust only.
+TYPE_SCALE_TOLERANCE = 1e-9
+# Inset of corner-mark reservation trims past the mark edge: pack-cursor float
+# accumulation (~1e-7 observed) must not bridge an exact-touch trim boundary
+# on clamped stacks; 1e-3 px is invisible with a thousandfold margin.
+RESERVE_DUST_MARGIN_PX = 1e-3
 # Hero panel share of the usable width (D.1.2: dominant region plus the rest;
 # the even split is ours -- no generic signal picks a lopsided share).
 HERO_SIDE_FRACTION = 0.5
@@ -171,11 +180,8 @@ PORTRAIT_ASPECT_CUTOFF = 1.0
 # this factor of the larger line-height: the midpoint between line-tiling
 # (gap ~0, one paragraph) and paragraph breaks (~1 line).
 TEXT_BLOCK_GAP_FACTOR = 0.5
-# Packed text rows pad this many ems (at the decided size) above and below
-# the estimated text height (quarter-em inset).
-TEXT_ROW_PADDING_EM = 0.25
 # Packed gaps as multiples of the larger adjacent decided font: inner rows of
-# one block match the padding micro-grid; outer gaps are full-em breaks.
+# one block sit tight at a quarter em; outer gaps are full-em breaks.
 BLOCK_INNER_GAP_EM = 0.25
 BLOCK_OUTER_GAP_EM = 1.0
 # A singleton text unit reads as a label (swappable around text blocks) when
@@ -515,8 +521,7 @@ def _decide_font_sizes(source: Design,
         group_cap = cap
         ratio_cap: float | None = None
         if largest_decided is not None and largest_size > 0:
-            ratio_cap = ((size / largest_size) * largest_decided
-                         * (1 + FONT_RATIO_TOLERANCE))
+            ratio_cap = (size / largest_size) * largest_decided
             group_cap = min(group_cap, ratio_cap)
         decided = []
         for element, _ in ordered[start:stop]:
@@ -609,6 +614,22 @@ def _family_candidates(source: Design, target: Canvas, *,
             boxes.update(placed)
             for element in unit.members:
                 scales[element.id] = scale
+        type_cap = _type_scale_cap(source, boxes)
+        if type_cap < math.inf:
+            for unit, slot in zip(ordered, slots):
+                if _has_non_text(unit):
+                    placed, scale = _place_slotted(
+                        unit, slot, target, cap=type_cap)
+                    boxes.update(placed)
+                    for element in unit.members:
+                        scales[element.id] = scale
+            for unit in fits:
+                if _has_non_text(unit):
+                    placed, scale = _place_slotted(
+                        unit, canvas_slot, target, cap=type_cap)
+                    boxes.update(placed)
+                    for element in unit.members:
+                        scales[element.id] = scale
         fonts = _decide_font_sizes(source, boxes, scales)
         _center_pill_labels(
             [unit for unit in list(ordered) + fits if _is_pill_unit(unit)],
@@ -1086,12 +1107,13 @@ def _pack_container(rows: list[_PackedRow], rect: Slot,
                     target: Canvas) -> tuple[list[Slot], list[float]]:
     """Packed rows in rect: text rows estimate-sized, rest uniform, centered.
 
-    Text rows take the full width with height from estimate_text_height plus
-    padding; pills render at natural size at most; independent overlays are
-    capped to the detached fraction; images and shapes width-fit. Inner gaps
-    separate block siblings, outer gaps separate blocks and units, and the
-    stack reserves a rhythm pad at the bottom, clamping uniformly when the
-    column is short. Returns row slots and scales in row order.
+    Text rows take the full width with height exactly estimate_text_height
+    (ink-tight, so box gaps are visual gaps); pills render at natural size at
+    most; independent overlays are capped to the detached fraction; images and
+    shapes width-fit. Inner gaps separate block siblings, outer gaps separate
+    blocks and units, and the stack centers exactly in the rect, clamping
+    uniformly when the rect is short. Returns row slots and scales in row
+    order.
     """
     if not rows:
         return [], []
@@ -1104,11 +1126,10 @@ def _pack_container(rows: list[_PackedRow], rect: Slot,
     for row, scale in zip(rows, scales):
         if row.member is not None:
             member = row.member
-            font = fonts[member.id]
             estimated = estimate_text_height(
-                member.content, col_w, font,
+                member.content, col_w, fonts[member.id],
                 float(member.effective_value("line_height")))
-            heights.append(float(estimated or 0) + 2 * TEXT_ROW_PADDING_EM * font)
+            heights.append(float(estimated or 0))
         else:
             heights.append(float(row.unit.bbox[3]) * scale)
     row_fonts = [_row_font(row, fonts) for row in rows]
@@ -1117,11 +1138,8 @@ def _pack_container(rows: list[_PackedRow], rect: Slot,
                                                       row_fonts, row_fonts[1:]):
         factor = BLOCK_INNER_GAP_EM if first.unit is second.unit else BLOCK_OUTER_GAP_EM
         gaps.append(factor * max(font_first, font_second))
-    stack_max = max(row_fonts, default=0.0)
-    last_font = row_fonts[-1] if row_fonts[-1] > 0 else stack_max
-    bottom_pad = BLOCK_OUTER_GAP_EM * last_font
     total = sum(heights) + sum(gaps)
-    avail = max(0.0, float(rect.height) - bottom_pad)
+    avail = float(rect.height)
     if total > avail and total > 0:
         clamp = avail / total
     else:
@@ -1185,6 +1203,34 @@ def _place_anchored(unit: LayoutUnit, target: Canvas, *,
 def _has_image(unit: LayoutUnit) -> bool:
     """True when any member is an image (hero and small signals)."""
     return any(member.type == "image" for member in unit.members)
+
+
+def _has_non_text(unit: LayoutUnit) -> bool:
+    """True when any member is not text (the type scale cap applies)."""
+    return any(member.type != "text" for member in unit.members)
+
+
+def _type_scale_cap(source: Design,
+                    boxes: dict[str, tuple[float, float, float, float]]
+                    ) -> float:
+    """Largest-text decided box-width scale; non-text units scale past never.
+
+    The largest text is the maximum font size with first source index breaking
+    ties; the cap is its decided box width over its source box width, so a
+    button keeps its source width proportion to the headline box. No texts, a
+    zero source width, or an undecided box lifts the cap (infinity).
+    """
+    texts = [(position, element) for position, element in enumerate(source.elements)
+             if element.type == "text"]
+    if not texts:
+        return math.inf
+    _, largest = max(texts, key=lambda pair: (float(pair[1].font_size),
+                                              -pair[0]))
+    src_w = float(largest.width)
+    placed = boxes.get(largest.id)
+    if src_w <= 0 or placed is None or placed[2] <= 0:
+        return math.inf
+    return placed[2] / src_w
 
 
 def _assembly_units(source: Design, group_mode: str
@@ -1332,6 +1378,37 @@ def _place_centered(smalls: list[LayoutUnit], target: Canvas,
     return boxes, out_scales
 
 
+def _lay_pack_jobs(pack_jobs: list[tuple[list[_PackedRow], Slot]],
+                   fonts: dict[str, float], caps: dict[int, float],
+                   target: Canvas
+                   ) -> tuple[list[tuple[_PackedRow, Slot, float]],
+                              dict[str, tuple[float, float, float, float]],
+                              dict[str, float]]:
+    """Pack-job rows to slots; returns (row slots, boxes, scales)."""
+    row_slots: list[tuple[_PackedRow, Slot, float]] = []
+    boxes: dict[str, tuple[float, float, float, float]] = {}
+    scales: dict[str, float] = {}
+    for rows, rect in pack_jobs:
+        slots, row_scales = _pack_container(rows, rect, fonts, caps, target)
+        for row, slot, scale in zip(rows, slots, row_scales):
+            row_slots.append((row, slot, scale))
+            if row.member is not None:
+                boxes[row.member.id] = (slot.x, slot.y, slot.width,
+                                        slot.height)
+                scales[row.member.id] = scale
+            else:
+                box_w = float(row.unit.bbox[2])
+                box_h = float(row.unit.bbox[3])
+                for element, (fx, fy, fw, fh) in zip(row.unit.members,
+                                                     row.unit.relative_geometry):
+                    boxes[element.id] = (
+                        slot.x + fx * box_w * scale,
+                        slot.y + fy * box_h * scale,
+                        fw * box_w * scale, fh * box_h * scale)
+                    scales[element.id] = scale
+    return row_slots, boxes, scales
+
+
 def _run_pack_passes(
     source: Design, target: Canvas, *,
     pack_jobs: list[tuple[list[_PackedRow], Slot]],
@@ -1345,10 +1422,13 @@ def _run_pack_passes(
 
     Each pass decides fonts in provisional tall boxes, lays out packed rows
     with clamping, places fits/anchors/fills, and caps rotation-bound rows;
-    the loop stops early when caps stabilize. Riders never shrink targets:
+    the loop stops early when caps stabilize. Non-text packed and fit units
+    additionally cap at the largest text's decided width scale (fills, riders,
+    and anchored smalls keep their own regimes). Riders never shrink targets:
     after the final layout each rider keeps its scaled center-offset with its
     own size capped to stay in-canvas and clear of text and pill boxes.
-    Final fonts are decided in the final boxes.
+    Final fonts are decided in the final boxes then pack jobs relay once with
+    them, so shipped gaps match shipped sizes before riders place.
     """
     canvas_w = float(target.width)
     canvas_h = float(target.height)
@@ -1406,26 +1486,8 @@ def _run_pack_passes(
                     tall[element.id] = placed[element.id]
                     seeds[element.id] = 1.0
         fonts = _decide_font_sizes(source, tall, seeds)
-        boxes = {}
-        scales = {}
-        row_slots: list[tuple[_PackedRow, Slot, float]] = []
-        for rows, rect in pack_jobs:
-            slots, row_scales = _pack_container(rows, rect, fonts, caps, target)
-            for row, slot, scale in zip(rows, slots, row_scales):
-                row_slots.append((row, slot, scale))
-                if row.member is not None:
-                    boxes[row.member.id] = (slot.x, slot.y, slot.width, slot.height)
-                    scales[row.member.id] = scale
-                else:
-                    box_w = float(row.unit.bbox[2])
-                    box_h = float(row.unit.bbox[3])
-                    for element, (fx, fy, fw, fh) in zip(row.unit.members,
-                                                         row.unit.relative_geometry):
-                        boxes[element.id] = (
-                            slot.x + fx * box_w * scale,
-                            slot.y + fy * box_h * scale,
-                            fw * box_w * scale, fh * box_h * scale)
-                        scales[element.id] = scale
+        row_slots, boxes, scales = _lay_pack_jobs(
+            pack_jobs, fonts, caps, target)
         for unit, slot, base_cap in fit_jobs:
             placed, scale = _place_slotted(
                 unit, slot, target,
@@ -1461,6 +1523,18 @@ def _run_pack_passes(
                 cap = room * SLOT_SAFETY_FACTOR
             key = id(row.unit)
             new_caps[key] = min(new_caps.get(key, math.inf), cap)
+        type_cap = _type_scale_cap(source, boxes)
+        if type_cap < math.inf:
+            for rows, _ in pack_jobs:
+                for row in rows:
+                    if row.member is None and _has_non_text(row.unit):
+                        key = id(row.unit)
+                        new_caps[key] = min(new_caps.get(key, math.inf),
+                                            type_cap)
+            for unit, _, _ in fit_jobs:
+                if _has_non_text(unit):
+                    key = id(unit)
+                    new_caps[key] = min(new_caps.get(key, math.inf), type_cap)
         if new_caps == caps:
             break
         caps = new_caps
@@ -1474,6 +1548,11 @@ def _run_pack_passes(
     for unit, _, _ in fit_jobs:
         if _is_pill_unit(unit):
             avoid_ids.update(member.id for member in unit.members)
+    fonts = _decide_font_sizes(source, boxes, scales)
+    _, pack_boxes, pack_scales = _lay_pack_jobs(
+        pack_jobs, fonts, caps, target)
+    boxes.update(pack_boxes)
+    scales.update(pack_scales)
     for overlay, overlay_target in riders:
         target_x, target_y = _placed_unit_center(overlay_target, boxes)
         scale = scales[overlay_target.members[0].id]
@@ -1487,7 +1566,6 @@ def _run_pack_passes(
         boxes.update(_place_rider(overlay, center_x, center_y, rider_scale))
         for element in overlay.members:
             scales[element.id] = rider_scale
-    fonts = _decide_font_sizes(source, boxes, scales)
     pill_units: dict[int, LayoutUnit] = {}
     for rows, _ in pack_jobs:
         for row in rows:
@@ -1498,6 +1576,49 @@ def _run_pack_passes(
             pill_units[id(unit)] = unit
     _center_pill_labels(list(pill_units.values()), boxes, fonts)
     return boxes, scales, fonts
+
+
+def _unit_outer_box(placed: dict[str, tuple[float, float, float, float]],
+                    unit: LayoutUnit) -> tuple[float, float, float, float]:
+    """Bounding box over a unit's placed member boxes."""
+    left = min(placed[member.id][0] for member in unit.members)
+    top = min(placed[member.id][1] for member in unit.members)
+    right = max(placed[member.id][0] + placed[member.id][2]
+                for member in unit.members)
+    bottom = max(placed[member.id][1] + placed[member.id][3]
+                 for member in unit.members)
+    return (left, top, right - left, bottom - top)
+
+
+def _reserve_marks(rects: list[Slot],
+                   anchor_boxes: list[tuple[float, float, float, float]]
+                   ) -> list[Slot]:
+    """Trim rect tops/bottoms past corner marks overlapping their x-range.
+
+    A mark centered above a rect's middle pushes the top down past the mark,
+    otherwise the bottom rises past it; reservation is spatial (the corner
+    belongs to the mark), never negotiated per row. A mark covering a rect
+    leaves a zero-height sliver the validator judges.
+    """
+    reserved = []
+    for rect in rects:
+        top = float(rect.y)
+        bottom = float(rect.y + rect.height)
+        middle = float(rect.y + rect.height / 2)
+        for left, mark_top, width, height in anchor_boxes:
+            if left + width <= rect.x or left >= rect.x + rect.width:
+                continue
+            mark_bottom = mark_top + height
+            if mark_bottom <= top or mark_top >= bottom:
+                continue
+            if mark_top + height / 2 < middle:
+                top = max(top, mark_bottom + RESERVE_DUST_MARGIN_PX)
+            else:
+                bottom = min(bottom, mark_top - RESERVE_DUST_MARGIN_PX)
+        if bottom < top:
+            bottom = top
+        reserved.append(Slot(rect.x, top, rect.width, bottom - top))
+    return reserved
 
 
 def _small_prefs(smalls: list[LayoutUnit], canvas: Canvas, *,
@@ -1513,6 +1634,16 @@ def _small_prefs(smalls: list[LayoutUnit], canvas: Canvas, *,
     return prefs
 
 
+def _anchor_reservations(anchor_jobs: list[tuple[LayoutUnit, bool, bool]],
+                         target: Canvas) -> list[tuple[float, float, float, float]]:
+    """Outer boxes of corner-anchored smalls (cap-free, hence final-exact)."""
+    reserved = []
+    for unit, top, left in anchor_jobs:
+        placed, _ = _place_anchored(unit, target, top=top, left=left)
+        reserved.append(_unit_outer_box(placed, unit))
+    return reserved
+
+
 def _hero_candidates(source: Design, target: Canvas, *,
                      mirror: bool) -> list[dict[str, Any]]:
     """Hero panel plus packed reading-ordered column, per mode/order/variant.
@@ -1522,6 +1653,7 @@ def _hero_candidates(source: Design, target: Canvas, *,
     opposite the hero with top/bottom rows (plus top-center on portrait
     targets); the rest pack in reading order with similar pills separated
     and label/block orders varied. Fill and canvas-fit units keep paths.
+    Anchored smalls reserve their corner boxes; packed rects trim past them.
     """
     canvas = source.source_canvas
     canvas_area = float(canvas.width) * float(canvas.height)
@@ -1569,9 +1701,6 @@ def _hero_candidates(source: Design, target: Canvas, *,
         variants = _small_variants(target) if smalls else (None,)
         for order in orders:
             groups = _split_subcolumns(order, target)
-            rects = _subcolumn_rects(column_slot, len(groups))
-            pack_jobs = [(_rows_for_units(group, block_keys), rect)
-                         for group, rect in zip(groups, rects)]
             for variant in variants:
                 if variant == "center":
                     anchor_jobs: list[tuple[LayoutUnit, bool, bool]] = []
@@ -1583,6 +1712,11 @@ def _hero_candidates(source: Design, target: Canvas, *,
                     anchor_jobs = [(unit, variant == "top", side)
                                    for unit, side in anchored]
                     center_units = []
+                rects = _reserve_marks(
+                    _subcolumn_rects(column_slot, len(groups)),
+                    _anchor_reservations(anchor_jobs, target))
+                pack_jobs = [(_rows_for_units(group, block_keys), rect)
+                             for group, rect in zip(groups, rects)]
                 boxes, scales, fonts = _run_pack_passes(
                     source, target, pack_jobs=pack_jobs, fit_jobs=fit_jobs,
                     anchor_jobs=anchor_jobs, center_units=center_units,
@@ -1670,9 +1804,6 @@ def banner_zones_candidates(source: Design, target: Canvas) -> list[dict[str, An
         fit_jobs = [(unit, canvas_slot, math.inf) for unit in fits]
         variants = _small_variants(target) if smalls else (None,)
         for order in orders:
-            rects = _zone_rects(order, target)
-            pack_jobs = [(_rows_for_units([unit], block_keys), rect)
-                         for unit, rect in zip(order, rects)]
             for variant in variants:
                 if variant == "center":
                     anchor_jobs: list[tuple[LayoutUnit, bool, bool]] = []
@@ -1684,6 +1815,11 @@ def banner_zones_candidates(source: Design, target: Canvas) -> list[dict[str, An
                     anchor_jobs = [(unit, variant == "top", side)
                                    for unit, side in anchored]
                     center_units = []
+                rects = _reserve_marks(
+                    _zone_rects(order, target),
+                    _anchor_reservations(anchor_jobs, target))
+                pack_jobs = [(_rows_for_units([unit], block_keys), rect)
+                             for unit, rect in zip(order, rects)]
                 boxes, scales, fonts = _run_pack_passes(
                     source, target, pack_jobs=pack_jobs, fit_jobs=fit_jobs,
                     anchor_jobs=anchor_jobs, center_units=center_units,
