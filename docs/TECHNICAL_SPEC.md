@@ -51,6 +51,40 @@ reconcile an uncertainty by inventing a constraint.
 
 ---
 
+## S04 implementation update (2026-10-30)
+
+The current production path is `resize -> build_candidate_pool -> validate -> score -> best valid snapshot`;
+legacy proportional repair is used only if no valid pool member survives. Per-family and per-candidate
+failures are isolated. This replaces the older planned-only status descriptions below for S04;
+learned ranking/training remain planned and no graph/model contracts change.
+
+`engine/candidate_pool.py` exposes `PoolConfig`, `PoolCandidate`, `CandidatePool`, and
+`build_candidate_pool(source, target, config=None, *, families=None, text_measurement=None)`.
+`PoolCandidate.design` provides the existing consumer-compatible Design view. `to_adobe()` returns
+fresh copies of the exact evaluated snapshot. Immutable serialized snapshots keep identity, validation,
+and scores consistent. `CandidatePool.candidates` includes invalid proposals and validation reports;
+`retained` includes only valid, deduplicated, diverse alternatives; `winner` is the highest-scoring valid
+proposal before diversity filtering. A scoring failure is recorded and sorts after finite scores,
+but cannot invalidate an otherwise valid design. If all valid scores fail, generation order breaks ties.
+
+IDs use the existing annotation convention: `sha256:` plus SHA-256 of sorted-key, compact,
+UTF-8 JSON with ensure_ascii=False and allow_nan=False. Source and target IDs are separate.
+Candidate metadata contains family, position, seed, generator/objective versions and failure information.
+The Adobe JSON contains only canvas and elements. Family lineage is supplied by the caller/exporter,
+never inferred from element IDs. Current deterministic families do not randomize with the seed;
+the seed is retained as configuration provenance for later stochastic proposals.
+
+Implemented families: SCALE_BASELINE, HORIZONTAL_FLOW, VERTICAL_STACK, HERO_LEFT, HERO_RIGHT,
+BANNER_ZONES, TWO_COLUMN, CONTROLLED_OVERLAY. Generator version is `s04_generator_v0.3`;
+pool versions append `+word_fit` or `+measured_text`, shape-stretch variants append `+shape_stretch_v1`, and refined candidates append `+layout_refinement_v1`.
+Objective is `objective_v6_relations_blank`. Shape stretching (`engine/shape_roles.py`, `engine/shape_stretch.py`, D.1.7)
+derives `label_fit`, `panel_fill`, `axis_x`, `axis_y` and `balanced` variants from the best valid layouts; the
+proportional layout stays in the pool and the scorer, not a preference for stretching, picks the winner.
+Post-stretch local refinement (`engine/layout_refinement.py`, D.1.8) then improves the best valid layouts that show a
+problem; refined candidates are extra pool records with parent/operator/score provenance, text-fit is `s04_word_fit_v3`,
+and the objective is `objective_v6_relations_blank`.
+See [S04 evaluation](S04_EVALUATION.md) for budgets, limitations, commands and evidence.
+
 ## 1. System architecture and pipeline
 
 ### 1.1 Goal
@@ -68,7 +102,7 @@ source JSON + target_canvas
         ▼
    Design (source)
         │
-        ├──────────────► S04 candidate production ──► LayoutCandidate(s)          [planned batch generator]
+        ├──────────────► S04 candidate production ──► LayoutCandidate(s)          [implemented pool]
         │                  (find_valid_layout retry loop + baseline_proposal)      [implemented]
         │                              │
         │                              ▼
@@ -81,15 +115,15 @@ source JSON + target_canvas
         │              S05 ranking: learned score (GNN)  ─ fallback → deterministic score [planned]
         │                              │
         │                              ▼
-        │                    selection / diversification                           [planned]
+        │                    selection / diversification                           [implemented deterministic]
         │                              │
         │                              ▼
         └──────────────► revalidate selected candidate → candidate.design.to_adobe() → {canvas, elements}
 ```
 
-The **currently implemented** path is only: `Design.from_adobe` → `find_valid_layout` (with
-`baseline_proposal`) → validated JSON. There is no batch generator, no deterministic scorer, no learned
-selection and no diversification in `resize()` today (§5, §6, §7).
+The implemented production path builds and validates a candidate pool, scores valid snapshots,
+returns the highest-scoring valid design, and uses legacy repair only when none survives.
+Diversification applies separately to the training pool. Learned ranking is not integrated.
 
 ### 1.3 Architectural decisions
 
@@ -114,13 +148,13 @@ selection and no diversification in `resize()` today (§5, §6, §7).
 | S04 output validator | `engine/candidate_validator.py` | **Implemented** (limitations in §8.1.4) |
 | S04 iterative retry + proportional repair | `engine/layout_search.py` | **Implemented** |
 | S04 allowlisted candidate edits | `engine/layout_edits.py` (stdlib only) | **Implemented**; used by `baseline_proposal`; planned families must use it (§8.1.6) |
-| S04 batch candidate generator, layout units, objective, diversification | — | **Planned** (Appendix D) |
-| S05 deterministic scorer | — | **Planned**; requirements settled, interface recommended in §6.2 (U3) |
+| S04 generator, units, objective, diversification | `engine/candidate_generator.py`, `layout_units.py`, `layout_objective.py`, `candidate_pool.py` | **Implemented**, provisional heuristics |
+| Deterministic scorer | `engine/layout_objective.py` | **Implemented**, provisional weights |
 | S05 original source dataset and review gallery | `scripts/generate_source_designs.py`, `scripts/source_templates.py`, `scripts/source_dataset.py` | **Implemented**, development only; [source pipeline](SOURCE_DATA_PIPELINE.md); human source approval still required |
 | S05 tournament annotation UI, candidate-manifest import, comparison export | `annotation/` | **Implemented**, development only ([ANNOTATION_TOURNAMENT.md](ANNOTATION_TOURNAMENT.md)); no human labels yet |
 | S05 dev candidate generator (diagnostic, not S04) | `annotation/dev_candidates.py` | **Implemented**, development only |
 | S05 training, evaluation, family-disjoint splits | — | **Planned** (Appendix E) |
-| S06 `resize` adapter | `engine/resize.py` | **Partial**: validated proportional fit only |
+| S06 `resize` adapter | `engine/resize.py` | **Implemented**: highest-scoring validated pool candidate, proportional fallback |
 | Preview renderer | `renderer/converter/` (vendored, used by `engine/main.py`) | **Implemented**; fidelity to the official scorer **Unresolved** (U9) |
 | CI | `.github/workflows/ci.yml`, `scripts/ci_tests.py` | **Implemented** ([CI.md](CI.md)) |
 
@@ -172,7 +206,7 @@ exist today accept a plain `Design` (S03) or an object exposing `.design` (`Cand
 | `layout_edit` | `(element: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]`; raises `ProtectedFieldError` | Implemented; generator-side allowlisted edit of an Adobe element dict (§8.1.6) | `layout_edits.py` |
 | `build_candidate_graph` | `(source: Design, candidate: Design, target: Canvas, *, text_embeddings: TextEmbeddingCache \| None = None, feature_version: str = "graph_v3") -> torch_geometric.data.Data` | Implemented | `graph_features.py:304` |
 | `score_candidates` | `(source: Design, candidates: Sequence[Design \| CandidateWithDesign], target: Canvas, *, checkpoint: RankerCheckpoint \| None = None, text_embeddings: TextEmbeddingCache \| None = None, batch_size: int = 32) -> list[float]` | Implemented | `ranker.py:345` |
-| `score_deterministic` | `(source: Design, candidates: Sequence[Design \| CandidateWithDesign], target: Canvas, *, weights: ObjectiveWeights \| None = None) -> list[float]` | **Planned**; proposed signature, mirrors `score_candidates` (§6.2, U3) | — |
+| `score_deterministic` | `(source: Design, candidates: Sequence[Design \| CandidateWithDesign], target: Canvas, *, weights: ObjectiveWeights \| None = None) -> list[float]` | **Implemented** | `engine/layout_objective.py` |
 | `rank_candidates` | `(source: Design, candidates: Sequence[LayoutCandidate], target: Canvas, *, checkpoint: RankerCheckpoint \| None = None, text_embeddings: TextEmbeddingCache \| None = None) -> RankedCandidates` | **Planned**; proposed learned-then-deterministic entry point (§6.4, U3) | — |
 | `RankedCandidates` | `(scores: tuple[float, ...], scorer: Literal["learned", "deterministic"], fallback_reason: str \| None)` | **Planned**; proposed | — |
 | `ScoredCandidate` | `(candidate: LayoutCandidate, report: ValidationReport, score: float, scorer: Literal["learned", "deterministic"])` | **Planned**; proposed: `score` is never `None` (§6.4) | — |
@@ -242,8 +276,8 @@ Contract:
 
 ## 5. S04 — Candidate generation and layout optimization
 
-**Status: Partial.** The retry loop, proportional repair and validator are implemented. The batch
-generator, layout units, objective and diversification are **Planned** ([Appendix D](reference/D_candidate_generation.md)).
+**Status: Implemented** for finite composition families, layout units, scoring, validation,
+diversification and proportional fallback. Continuous optimization and human calibration remain planned.
 
 ### 5.1 Implemented: iterative retry loop (`find_valid_layout`)
 
@@ -262,12 +296,11 @@ generator, layout units, objective and diversification are **Planned** ([Appendi
 - Text `font_size` becomes `max(1.0, font_size · min(sx, sy))`.
 - This is a geometric fallback, not a claim of attractive or legible reflow. It does not search font sizes or compositions.
 
-### 5.3 Planned: batch generator
+### 5.3 Implemented: candidate pool
 
-`generate_candidates(source, target, config) -> list[LayoutCandidate]` (§2.3) with layout units, composition
-families, two-stage solver, soft objective and diversification: Appendix D. Every produced candidate must
-pass `validate_candidate` before ranking (§8.1.3). `find_valid_layout` is kept as the iterative
-validation/repair mechanism; §5.4 defines how the two compose.
+`build_candidate_pool` composes family proposals, isolated validation/scoring, exact/near dedupe,
+and diverse retention. See the S04 implementation update above and Appendix D.3. The original
+`generate_candidates`/`LayoutConfig` names below remain future API proposals; they are not aliases.
 
 ### 5.4 Planned: generator / validator / repair integration contract (U2)
 
@@ -316,8 +349,8 @@ field. `generator_version` is stamped by the code, not configured.
 
 ## 6. S05 — Ranking and candidate selection
 
-**Status: Partial.** The learned scorer is implemented but untrained; deterministic scoring, selection and
-training are **Planned**.
+**Status: Partial.** Deterministic scoring and pool selection are implemented. The learned scorer
+is implemented but untrained; training and learned production selection remain planned.
 
 ### 6.1 Learned ranking — Implemented (untrained)
 
@@ -326,10 +359,10 @@ across candidates of the same source and target; they are not calibrated probabi
 checkpoint whose training metadata declares `status="trained"`; otherwise it raises `CheckpointUnavailable`.
 Details and failure cases: Appendix C.2–C.4. **No trained checkpoint exists.**
 
-### 6.2 Deterministic scorer — Planned (U3)
+### 6.2 Deterministic scorer - Implemented
 
-**Status:** the requirements below are settled direction. The signature, return types and exception
-behavior are the **recommended contract**; implementation needs team sign-off.
+**Status:** implemented by `score_deterministic` in `engine/layout_objective.py`.
+Weights remain provisional.
 
 **Role.** The deterministic scorer is the primary scorer until a trained checkpoint exists, and the
 fallback when the learned scorer fails (§6.4). It is the permanent baseline that the GNN is compared against
@@ -356,10 +389,10 @@ calling its output validated. Any change to a weight or constant bumps `objectiv
 - Raises `ValueError` for malformed input (a candidate whose IDs do not match the source, or a changed element type), as `build_candidate_graph` does. It never returns a partial list and never substitutes a default score.
 - The scorer carries an `objective_version` string. Weights and term definitions are versioned with it.
 
-### 6.3 Selection and diversification — Planned (U4)
+### 6.3 Selection and diversification - Implemented for deterministic pools
 
-Among validated candidates, rank by learned score (or deterministic score) and select up to `k` meaningfully
-different alternatives (D.2). The official boundary uses only the first choice.
+Production returns the highest deterministic score among validated snapshots. Internal retention
+separately selects diverse alternatives (D.3); its order is not a human preference label.
 
 ### 6.4 Fallback policy
 
@@ -594,7 +627,7 @@ failed check.
 
 **Still to do:**
 
-1. Property tests for each planned family (VERTICAL_STACK, HORIZONTAL_FLOW, TWO_COLUMN, HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY). Deferred because no code exists. When one is implemented it must build candidates through `layout_edit` and be registered in `FAMILIES` in `tests/test_layout_edits.py`.
+1. Property tests for each planned family: VERTICAL_STACK, HORIZONTAL_FLOW, HERO_LEFT, HERO_RIGHT and BANNER_ZONES are implemented, build through `layout_edit`, and registered in `FAMILIES` in `tests/test_layout_edits.py`. Still deferred for lack of code: TWO_COLUMN, CONTROLLED_OVERLAY. When one is implemented it must build candidates through `layout_edit` and be registered in `FAMILIES`.
 2. A test of the revalidation after selection, when ranking and selection exist.
 3. Contrast and visual hierarchy may enter scoring only through declared colors and sizes; no term is defined yet and none may inspect pixels or assets.
 

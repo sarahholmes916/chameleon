@@ -482,9 +482,79 @@ def test_tournament_records_review_status_of_its_source(db, source_root):
 
 # ---------------------------------------------------------------- UI wiring and style
 
+def test_queue_resumes_without_approval_and_does_not_repeat_completed_sets(db):
+    from annotation import work_queue
+
+    conn, ids, path = db
+    tid, _ = work_queue.next_task(conn)
+    assert store.load_state(conn, tid).tournament["source_review_status"] == "unknown"
+    vote(conn, tid)
+    resumed = store.connect(path)
+    assert work_queue.next_task(resumed)[0] == tid
+    assert len(store.list_tournaments(resumed)) == 1
+    for _ in range(6):
+        vote(resumed, tid)
+    assert work_queue.next_task(resumed)[0] is None
+    assert len(store.list_tournaments(resumed)) == 1
+    resumed.close()
+
+
+def test_queue_source_rejection_preserves_labels_but_excludes_training(db):
+    from annotation import work_queue
+
+    conn, ids, _ = db
+    tid, _ = work_queue.next_task(conn)
+    vote(conn, tid)
+    assert export.comparison_rows(conn)[0]["usable_for_pairwise_loss"]
+    work_queue.reject_source(conn, tid)
+    assert work_queue.next_task(conn)[0] is None
+    row = export.comparison_rows(conn)[0]
+    assert row["source_rejected_in_queue"] and not row["usable_for_pairwise_loss"]
+    assert row["label"] in store.DECISIVE
+
+
+def test_queue_discovers_valid_nested_manifests_and_reports_invalid(db, world, tmp_path):
+    from annotation import work_queue
+
+    conn, ids, _ = db
+    root = tmp_path / "batch_repo"
+    nested = root / "data/candidates/batch/source/target"
+    nested.mkdir(parents=True)
+    (nested / candidates.MANIFEST_NAME).write_text(world[2].manifest.read_text(), encoding="utf-8")
+    bad = root / "data/candidates/broken"
+    bad.mkdir()
+    (bad / candidates.MANIFEST_NAME).write_text("not json", encoding="utf-8")
+    assert len(work_queue.sync(conn, root)) == 1
+    assert conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] == 8
+    work_queue.sync(conn, root)
+    assert conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] == 8
+
+
+def test_queue_advances_to_next_target_after_completion(db, world, tmp_path):
+    from annotation import work_queue
+
+    conn, ids, _ = db
+    second = build_candidate_set(world[1], {"width": 800, "height": 800}, tmp_path / "second",
+                                 renderer=FakeRenderer(), seed=9, count=8, poor=2)
+    assert not candidates.import_manifest(conn, second.manifest)["rejected"]
+    first, _ = work_queue.next_task(conn)
+    for _ in range(7):
+        vote(conn, first)
+    next_tid, _ = work_queue.next_task(conn)
+    assert next_tid != first and next_tid is not None
+    a, b = (store.load_state(conn, tid).tournament for tid in (first, next_tid))
+    assert a["source_design_id"] == b["source_design_id"]
+    assert a["target_width"] != b["target_width"]
+    work_queue.reject_source(conn, next_tid)
+    assert work_queue.next_task(conn)[0] is None
+
+
 def test_gradio_app_builds_and_initial_render_matches_outputs(db, tmp_path):
     from annotation import app
     conn, ids, path = db
+    source_preview = tmp_path / "original.png"
+    Image.new("RGB", (100, 150), "navy").save(source_preview)
+    conn.execute("UPDATE candidates SET source_preview_path=?", (str(source_preview),))
     tid = new_tournament(conn, ids)
     demo = app.build_app(path)
     try:
@@ -495,6 +565,57 @@ def test_gradio_app_builds_and_initial_render_matches_outputs(db, tmp_path):
         assert len(result) == len(load.outputs) == 21
         assert result[0] == tid and tid in result[3]
         assert "Candidate A" in result[5] and "Candidate B" in result[6] and result[18]["status"] == "ready"
+        assert "Original source design" in result[19] and "<img " in result[19]
+        source_component = load.outputs[19]
+        assert source_component.elem_id == "original-source-preview"
+        assert source_component.visible
+        # The source and both candidates share one comparison row, with no collapsed accordion.
+        assert source_component.parent.parent is load.outputs[5].parent.parent
+        assert source_component.parent.parent is load.outputs[6].parent.parent
+    finally:
+        demo.close()
+
+
+def test_ui_queue_starts_resumes_and_finishes_without_manual_selection(db, monkeypatch):
+    from annotation import app
+
+    monkeypatch.setattr(app.work_queue, "sync", lambda *_: [])
+    demo = app.build_app(db[2])
+    try:
+        handlers = {getattr(fn.fn, "__name__", ""): fn for fn in demo.fns.values()}
+        start = handlers["on_start_queue"]
+        result = start.fn("tester", "Fit")
+        assert len(result) == len(start.outputs) == 21
+        tid = result[0]
+        assert tid and result[18]["status"] == "ready"
+        assert handlers["on_load"].fn()[0] == tid
+        for _ in range(7):
+            vote(db[0], tid)
+        finished = handlers["on_load"].fn()
+        assert finished[0] is None and "Queue finished" in finished[17]
+        assert len(store.list_tournaments(db[0])) == 1
+    finally:
+        demo.close()
+
+
+def test_ui_discovers_nested_candidate_batches_on_refresh(db, tmp_path, monkeypatch):
+    from annotation import app
+
+    monkeypatch.setattr(app, "REPO_ROOT", tmp_path)
+    direct = tmp_path / "data/candidates/standalone/candidate_manifest.jsonl"
+    direct.parent.mkdir(parents=True)
+    direct.write_text("", encoding="utf-8")
+    demo = app.build_app(db[2])
+    try:
+        refresh = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", "") == "on_refresh")
+        assert refresh.fn()[0]["choices"] == [direct.relative_to(tmp_path).as_posix()]
+        nested = tmp_path / "data/candidates/batch/source/1600x400/candidate_manifest.jsonl"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("", encoding="utf-8")
+        (nested.parent / "other.jsonl").write_text("", encoding="utf-8")
+        assert refresh.fn()[0]["choices"] == sorted(
+            path.relative_to(tmp_path).as_posix() for path in (direct, nested)
+        )
     finally:
         demo.close()
 

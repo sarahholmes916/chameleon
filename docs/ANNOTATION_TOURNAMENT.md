@@ -11,6 +11,28 @@ spec) specifies a local **Gradio Blocks** app backed by SQLite. [CHAMELEON_DATA_
 
 ## Install and run
 
+### Automatic annotation queue
+
+Launch the UI and click **Start / resume all layouts** in the Tournament tab.
+It recursively discovers and validates manifests under `data/candidates`, groups candidates
+by exact source ID and target dimensions, and processes sources and their targets consecutively.
+No manual import, source/target matching, or source approval is required for this workflow.
+The source's actual review status remains recorded; annotation never auto-approves source designs.
+Completed sets are not repeated. Unfinished tournaments resume from SQLite, including after restart.
+The queue uses the largest supported bracket (4, 8, or 16) that fits the pool; larger pools
+are sampled deterministically and pools below four are excluded. A completed set is not reopened
+automatically when more candidates are later added; use the manual tournament controls for that.
+
+Finish a bracket to advance automatically. Ties, both-bad and skipped comparisons remain
+non-winning labels; existing manual advancement controls resolve their bracket positions.
+The original source preview is always visible beside both candidates, with the same zoom control.
+For a broken original, select
+**Reject this source for all targets**. This persists a queue rejection, skips all its remaining
+targets, and exports previous judgments with `source_rejected_in_queue=true` and
+`usable_for_pairwise_loss=false`, retaining their original labels for audit.
+Source review remains available as an optional separate workflow. Import failures are reported
+on starting the queue; structural validation is still mandatory.
+
 ```powershell
 python -m venv .venv/annotation
 .\.venv\annotation\Scripts\python.exe -m pip install -r requirements-annotation.txt

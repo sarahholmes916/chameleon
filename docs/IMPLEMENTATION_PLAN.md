@@ -111,7 +111,8 @@ This is the only milestone numbering in the repository.
 - [ ] Proportional baseline and composition templates; multiple reproducible candidates.
 - [x] Allowlisted generator edit helper `layout_edit` (`engine/layout_edits.py`), derived from the validator's `mutable_fields`, with unit tests; `baseline_proposal` emits elements only through it ([spec §8.1.6](TECHNICAL_SPEC.md#816-stage-1-design-property-preservation-project-requirement)). Deviation: it works on Adobe element dicts and is independent of the still-planned S02 `with_updates`.
 - [x] Property tests for the implemented baseline family on the three samples (only K6 fields differ; protected data identical; source unmodified).
-- [ ] Property tests for each planned family (VERTICAL_STACK, HORIZONTAL_FLOW, TWO_COLUMN, HERO_LEFT, HERO_RIGHT, CONTROLLED_OVERLAY): deferred until each exists; each must use `layout_edit`.
+- [x] Property tests for each implemented family — VERTICAL_STACK, HORIZONTAL_FLOW (both suites), BANNER_ZONES (both suites), HERO_LEFT/RIGHT (both suites): only K6 fields differ; each emits through `layout_edit`.
+- [ ] Property tests for each remaining planned family (TWO_COLUMN, CONTROLLED_OVERLAY): deferred until each exists; each must use `layout_edit`.
 - [x] Regression tests naming text, fill and stroke color, stroke width and removal, opacity, rotation, `z_index` and `font_size` on non-text elements, plus permitted changes still passing ([spec §8.1.6](TECHNICAL_SPEC.md#816-stage-1-design-property-preservation-project-requirement)).
 - [x] Hard validation and violation reports ([spec §8.1](TECHNICAL_SPEC.md#81-constraint-specification-single-authoritative-section)).
 - [x] Bounded retry with proportional geometric repair; exhaustion raises `NoFeasibleLayout`.
@@ -167,3 +168,33 @@ these were checked by inspection or a one-off run, stated on each line; none is 
 - **PR checklist:** what changed; functions exposed; test command and observed result; limitations; effect on the other owner.
 - **Honest status:** mark only inspected, tested work complete.
 - **Agent instructions:** [AGENTS.md](../AGENTS.md) covers workflow; progress lives here, not duplicated across prompts.
+
+
+## S04 robustness and training-readiness update (2026-10-30)
+
+Implemented: reachable guarded ungrouped text clustering; bounded banner/packed gaps;
+family-isolated candidate pool; two-column and controlled-overlay families; S04-only word fitting
+and optional measured refinement; occlusion-sensitive objective v3; exact/near deduplication and
+family-balanced retention separate from production ranking; real-renderer benchmark/manifest export.
+Core and renderer tests are wired into the existing CI jobs. See [S04_EVALUATION.md](S04_EVALUATION.md).
+Still pending: human calibration of weights/spacing/readability, perceptual evaluation, continuous
+geometry optimization, broad unseen-design evaluation, and GNN training/integration. No training or
+model/graph changes are included. Existing annotation UI edits are preserved separately.
+
+## S04 shape stretching update (2026-10-30)
+
+Implemented: deterministic shape roles, independent-axis shape stretching as pool variants (`label_fit`,
+`panel_fill`, `axis_x`, `axis_y`, `balanced`), objective v4 (ellipse distortion, label padding symmetry,
+backdrop panels excluded from coverage/spacing/balance), variant provenance, shape-aware retention distinctness,
+generator v0.3. Tests: `tests/test_shape_stretch.py` (core), `tests/test_shape_stretch_graph.py` (ML). Evidence and
+limits: [S04_EVALUATION.md](S04_EVALUATION.md). No graph feature, ranker, checkpoint or label change.
+Still pending: human preference judgements on stretched vs proportional layouts and calibration of all new constants.
+
+## S04 local refinement update (2026-10-30)
+
+Implemented: bounded deterministic post-stretch local refinement (`engine/layout_refinement.py`, D.1.8) integrated into the
+candidate pool with separate budgets and provenance; objective v5 (worst-text readability share, ungrouped containment);
+`s04_word_fit_v3` calibrated against the real renderer; three-way before/after benchmark (`scripts/evaluate_s04.py`).
+Tests: `tests/test_layout_refinement.py` (core), renderer-backed text-fit tests in `tests/test_s04_rendering.py`.
+Evidence and limits: [S04_EVALUATION.md](S04_EVALUATION.md). No graph feature, ranker, checkpoint or label change.
+Still pending: human preference comparisons of baseline/stretched/refined layouts and calibration of every new constant.

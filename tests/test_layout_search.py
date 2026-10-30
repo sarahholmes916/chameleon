@@ -170,12 +170,25 @@ def test_real_samples_repair_invalid_baseline_and_preserve_source(filename):
         assert 0 <= top <= bottom <= target.height
         if original.type == "image":
             assert element.asset_id == original.asset_id
-            assert element.width / element.height == pytest.approx(original.width / original.height)
+            if original.effective_value("fit") != "cover":
+                assert element.width / element.height == pytest.approx(original.width / original.height)
+
+
+def _raise_proposal(*args, **kwargs):
+    raise RuntimeError("synthetic proposal failure")
 
 
 def test_resize_boundary_propagates_search_failure(monkeypatch):
     import engine.resize as resize_module
     monkeypatch.setattr(resize_module, "baseline_proposal", lambda *_: {})
+    monkeypatch.setattr(resize_module, "baseline_candidate", _raise_proposal)
+    monkeypatch.setattr(resize_module, "horizontal_flow_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "vertical_stack_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "hero_left_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "hero_right_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "banner_zones_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "two_column_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "controlled_overlay_candidates", _raise_proposal)
     raw = design_json()
     with pytest.raises(NoFeasibleLayout):
         resize(raw, raw["canvas"])
@@ -192,6 +205,14 @@ def test_cli_does_not_write_or_render_a_failed_task(monkeypatch, tmp_path):
     monkeypatch.setattr(main_module, "INPUT_DIR", input_dir)
     monkeypatch.setattr(main_module, "OUTPUT_DIR", output_dir)
     monkeypatch.setattr(resize_module, "baseline_proposal", lambda *_: {})
+    monkeypatch.setattr(resize_module, "baseline_candidate", _raise_proposal)
+    monkeypatch.setattr(resize_module, "horizontal_flow_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "vertical_stack_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "hero_left_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "hero_right_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "banner_zones_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "two_column_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "controlled_overlay_candidates", _raise_proposal)
     rendered = []
     monkeypatch.setattr(main_module, "render_to_png", lambda *args: rendered.append(args))
     with pytest.raises(NoFeasibleLayout):

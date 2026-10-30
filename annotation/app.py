@@ -14,7 +14,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from annotation import candidates, export, source_review, store, views
+from annotation import candidates, export, source_review, store, views, work_queue
 from annotation.bracket import SIZES
 from annotation.candidates import REPO_ROOT
 
@@ -88,11 +88,38 @@ def build_app(db_path: Path | str) -> gr.Blocks:
     # ------------------------------------------------------------ event handlers
     def on_load():
         c = conn()
+        if store.get_meta(c, "automatic_queue") == "yes":
+            tid, message = work_queue.next_task(c)
+            return render(tid, None, QUEUES[0], "Fit", message)
         tid = store.get_meta(c, "last_tournament")
         if tid is None or c.execute("SELECT 1 FROM tournaments WHERE tournament_id=?", (tid,)).fetchone() is None:
             rows = store.list_tournaments(c)
             tid = rows[0]["tournament_id"] if rows else None
         return render(tid, None, QUEUES[0], "Fit")
+
+    def on_start_queue(annotator, zoom):
+        c = conn()
+        problems = work_queue.sync(c, REPO_ROOT)
+        store.set_meta(c, "automatic_queue", "yes")
+        tid, message = work_queue.next_task(c, annotator or "local_annotator")
+        if problems:
+            message += "\n\nImport problems:\n" + "\n".join(problems)
+        return render(tid, None, QUEUES[0], zoom, message)
+
+    def queue_render(tid, queue, zoom, message, annotator):
+        c = conn()
+        if store.get_meta(c, "automatic_queue") == "yes" and (not tid or store.load_state(c, tid).complete):
+            tid, progress = work_queue.next_task(c, annotator or "local_annotator")
+            message += "\n\n" + progress
+        return render(tid, None, queue, zoom, message)
+
+    def on_reject_source(tid, annotator, zoom):
+        if not tid:
+            return render(None, None, QUEUES[0], zoom, "No source selected.")
+        c = conn()
+        work_queue.reject_source(c, tid)
+        tid, message = work_queue.next_task(c, annotator or "local_annotator")
+        return render(tid, None, QUEUES[0], zoom, "Source rejected for all targets. Its labels are excluded from training.\n\n" + message)
 
     def on_vote(choice):
         def handler(tid, presented, tags, annotator, queue, zoom):
@@ -109,7 +136,7 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                     " The match stays unresolved until you choose who advances." if choice not in ("LEFT", "RIGHT") else ""))
             except store.StaleMatch as exc:
                 message = f"⚠️ {exc} Showing the current state."
-            return render(tid, None, queue, zoom, message)
+            return queue_render(tid, queue, zoom, message, annotator)
         return handler
 
     def on_resolve(side):
@@ -122,7 +149,7 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                 message = "Advanced manually. Your original response is preserved and exported as the label."
             except store.StaleMatch as exc:
                 message = f"⚠️ {exc}"
-            return render(tid, None, queue, zoom, message)
+            return queue_render(tid, queue, zoom, message, annotator)
         return handler
 
     def on_redo(tid, presented, annotator, queue, zoom):
@@ -156,7 +183,7 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                  json.dumps(list(k))) for k, g in seen.items()]
 
     def discovered_manifests():
-        return sorted(str(p.relative_to(REPO_ROOT).as_posix()) for p in (REPO_ROOT / "data/candidates").glob(f"*/{candidates.MANIFEST_NAME}"))
+        return sorted(str(p.relative_to(REPO_ROOT).as_posix()) for p in (REPO_ROOT / "data/candidates").rglob(candidates.MANIFEST_NAME))
 
     def discovered_datasets():
         return sorted(p.parent.relative_to(REPO_ROOT).as_posix() for p in (REPO_ROOT / "data/sources").glob("*/manifest.jsonl"))
@@ -273,6 +300,9 @@ def build_app(db_path: Path | str) -> gr.Blocks:
         gr.Markdown("# Chameleon layout tournament\nPick the better resized layout. Dev tool — scores and generator identity are never shown.")
         with gr.Tabs() as tabs:
             with gr.Tab("Tournament", id="tab_tournament"):
+                gr.Markdown("Start the queue to load your generated layouts automatically. Source review is optional. "
+                            "Finish each set to advance automatically; restart with the same button to resume.")
+                start_queue = gr.Button("Start / resume all layouts", variant="primary")
                 with gr.Row():
                     tournament_dd = gr.Dropdown(label="Tournament", choices=[], scale=3)
                     queue = gr.Radio(QUEUES, value=QUEUES[0], label="Queue", scale=2)
@@ -281,7 +311,13 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                 header = gr.Markdown()
                 bracket_view = gr.HTML()
                 with gr.Row():
-                    left_view, right_view = gr.HTML(), gr.HTML()
+                    with gr.Column(scale=1, min_width=220):
+                        source_view = gr.HTML(elem_id="original-source-preview")
+                        reject_source_btn = gr.Button("Reject this source for all targets")
+                    with gr.Column(scale=2, min_width=300):
+                        left_view = gr.HTML()
+                    with gr.Column(scale=2, min_width=300):
+                        right_view = gr.HTML()
                 with gr.Row():
                     btn_left = gr.Button("A wins  ←", variant="primary", elem_id="btn-left", interactive=False, scale=3)
                     btn_tie = gr.Button("Tie  (T)", elem_id="btn-tie", interactive=False)
@@ -297,8 +333,6 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                     btn_undo = gr.Button("Undo last decision  (U)", elem_id="btn-undo", interactive=False)
                     btn_redo = gr.Button("Redo this match", interactive=False)
                     focus_dd = gr.Dropdown(label="Show match", choices=[], scale=3)
-                with gr.Accordion("Original source design", open=False):
-                    source_view = gr.HTML()
                 gr.Markdown("Keyboard: ← A wins · → B wins · T tie · B both bad · S skip · U undo")
             with gr.Tab("New tournament", id="tab_new"):
                 gr.Markdown("A tournament uses candidates of **one source and one target**. Import a `candidate_manifest.jsonl` "
@@ -357,6 +391,8 @@ def build_app(db_path: Path | str) -> gr.Blocks:
         outs = [tid_state, tournament_dd, focus_dd, header, bracket_view, left_view, right_view, btn_left, btn_tie, btn_bad,
                 btn_skip, btn_right, res_left, res_right, btn_redo, btn_undo, tags, status, presented_state, source_view, history]
         demo.load(on_load, None, outs)
+        start_queue.click(on_start_queue, [annotator, zoom], outs)
+        reject_source_btn.click(on_reject_source, [tid_state, annotator, zoom], outs)
         common = [tid_state, presented_state, tags, annotator, queue, zoom]
         btn_left.click(on_vote("LEFT"), common, outs, show_progress="hidden")
         btn_right.click(on_vote("RIGHT"), common, outs, show_progress="hidden")
