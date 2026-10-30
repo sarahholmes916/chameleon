@@ -1,7 +1,8 @@
 # Appendix E — S05 annotation, dataset, training and evaluation (planned design)
 
-> **Appendix E of [TECHNICAL_SPEC.md](../TECHNICAL_SPEC.md).** Status: **planned**. There is no
-> `annotation/` or `training/` directory, no human labels and no trained checkpoint. The model being
+> **Appendix E of [TECHNICAL_SPEC.md](../TECHNICAL_SPEC.md).** Status: E.1 is **partly implemented** as a
+> tournament UI in `annotation/` ([ANNOTATION_TOURNAMENT.md](../ANNOTATION_TOURNAMENT.md)); E.2–E.4 are planned. There is
+> no `training/` directory, no human labels and no trained checkpoint. The model being
 > trained is defined in [Appendix C](C_ranker_model.md). Checkpoint provenance requirements are in C.3.
 
 **Implemented prerequisite:** the original source-design pipeline and review gallery are documented in

@@ -117,7 +117,9 @@ selection and no diversification in `resize()` today (§5, §6, §7).
 | S04 batch candidate generator, layout units, objective, diversification | — | **Planned** (Appendix D) |
 | S05 deterministic scorer | — | **Planned**; requirements settled, interface recommended in §6.2 (U3) |
 | S05 original source dataset and review gallery | `scripts/generate_source_designs.py`, `scripts/source_templates.py`, `scripts/source_dataset.py` | **Implemented**, development only; [source pipeline](SOURCE_DATA_PIPELINE.md); human source approval still required |
-| S05 pairwise annotation UI, candidate dataset, training, evaluation | — | **Planned** (Appendix E) |
+| S05 tournament annotation UI, candidate-manifest import, comparison export | `annotation/` | **Implemented**, development only ([ANNOTATION_TOURNAMENT.md](ANNOTATION_TOURNAMENT.md)); no human labels yet |
+| S05 dev candidate generator (diagnostic, not S04) | `annotation/dev_candidates.py` | **Implemented**, development only |
+| S05 training, evaluation, family-disjoint splits | — | **Planned** (Appendix E) |
 | S06 `resize` adapter | `engine/resize.py` | **Partial**: validated proportional fit only |
 | Preview renderer | `renderer/converter/` (vendored, used by `engine/main.py`) | **Implemented**; fidelity to the official scorer **Unresolved** (U9) |
 | CI | `.github/workflows/ci.yml`, `scripts/ci_tests.py` | **Implemented** ([CI.md](CI.md)) |

@@ -105,11 +105,16 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+      - name: Install renderer system libraries
+        # skia-python imports libEGL/libGL at load time; a bare runner image may not have them.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libfontconfig1
       - name: Install source generation and renderer dependencies
         run: |
-          python -m pip install -r requirements-dev.txt -r requirements-sources.txt
+          python -m pip install -r requirements-dev.txt -r requirements-sources.txt -r requirements-annotation.txt
           python -m pip check
-      - name: Lint source generation and tests
-        run: python -m ruff check --no-cache scripts tests/test_source_designs.py
+      - name: Lint source generation, annotation and tests
+        run: python -m ruff check --no-cache scripts annotation tests/test_source_designs.py tests/test_annotation.py
       - name: Execute source contracts and actual offline renderer tests
         run: python -m scripts.ci_tests sources

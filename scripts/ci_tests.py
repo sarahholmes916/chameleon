@@ -17,7 +17,7 @@ SUITES = {
              "tests/test_layout_objective.py", "tests/test_candidate_generator.py",
              "tests/test_resize.py"),
     "ml": ("tests/test_graph_features.py", "tests/test_ranker.py"),
-    "sources": ("tests/test_source_designs.py",),
+    "sources": ("tests/test_source_designs.py", "tests/test_annotation.py"),
 }
 CPU_ALLOWED_SKIPS = {
     "tests/test_ranker.py::test_cuda_forward_backward_and_cpu_eval_agree": "CUDA unavailable",
@@ -115,7 +115,7 @@ def check_environment(suite: str) -> None:
         for name in ("engine.graph_features", "engine.text_embeddings", "engine.ranker"):
             importlib.import_module(name)
     else:
-        for name in ("jsonschema", "PIL", "cr_renderer", "scripts.source_dataset"):
+        for name in ("jsonschema", "PIL", "cr_renderer", "gradio", "scripts.source_dataset", "annotation.store", "annotation.app"):
             importlib.import_module(name)
         print("Source generation uses local brand assets/fonts and the actual renderer.", flush=True)
 
