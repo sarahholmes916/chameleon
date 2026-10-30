@@ -18,7 +18,7 @@ SUITES = {
              "tests/test_resize.py", "tests/test_candidate_pool.py", "tests/test_shape_stretch.py",
              "tests/test_layout_refinement.py"),
     "ml": ("tests/test_graph_features.py", "tests/test_ranker.py", "tests/test_shape_stretch_graph.py"),
-    "sources": ("tests/test_source_designs.py", "tests/test_annotation.py", "tests/test_s04_rendering.py"),
+    "sources": ("tests/test_source_designs.py", "tests/test_annotation.py", "tests/test_s04_rendering.py", "tests/test_rankings.py"),
 }
 CPU_ALLOWED_SKIPS = {
     "tests/test_ranker.py::test_cuda_forward_backward_and_cpu_eval_agree": "CUDA unavailable",

@@ -119,6 +119,6 @@ jobs:
           python -m pip install -r requirements-dev.txt -r requirements-sources.txt -r requirements-annotation.txt
           python -m pip check
       - name: Lint source generation, annotation and tests
-        run: python -m ruff check --no-cache scripts annotation tests/test_source_designs.py tests/test_annotation.py tests/test_s04_rendering.py
+        run: python -m ruff check --no-cache scripts annotation tests/test_source_designs.py tests/test_annotation.py tests/test_s04_rendering.py tests/test_rankings.py
       - name: Execute source contracts and actual offline renderer tests
         run: python -m scripts.ci_tests sources

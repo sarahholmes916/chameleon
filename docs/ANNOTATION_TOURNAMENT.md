@@ -11,6 +11,42 @@ spec) specifies a local **Gradio Blocks** app backed by SQLite. [CHAMELEON_DATA_
 
 ## Install and run
 
+### Portable two-person assignments
+
+Run `python -m scripts.package_rankings` to create `data/rankings/sarah/` and
+`data/rankings/teammate/`, plus matching ZIPs. The command refuses to overwrite an existing output;
+use `--output` for another batch. It includes every candidate and target from
+`data/candidates/batch_pilot20` (480 old candidates) and
+`data/evaluation/s04_refinement_v3` (378 candidates, latest full S04 batch).
+Each person receives 240 old and 189 S04 candidates: 429 total, with no overlap or sampling.
+Whole source/target/generator sets stay together except one six-candidate S04 set,
+which is divided into two three-candidate brackets to make the halves exactly equal.
+Each assignment contains 62 brackets and requires 367 comparisons if completed without exclusions.
+Brackets support 2-16 entrants, using structural byes for non-power-of-two sizes;
+byes produce no human labels. The assignment queue processes every bracket, even when
+old and S04 sets share a source and target. Seeds fix the split and bracket order.
+These are annotator assignments, not train/validation/test partitions; related sources
+and template families must still stay together for model evaluation.
+
+Each folder includes a UI code snapshot, original/candidate JSON and previews, relative manifests,
+SHA-256 file checks, requirements.txt, run.py and START_HERE.md. No external renderer/assets/GPU
+or Git checkout is needed to annotate the packaged previews. In an extracted folder:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe run.py
+# After labeling (stop UI with Ctrl+C first):
+.\.venv\Scripts\python.exe run.py --export
+```
+
+The launcher imports only its assigned candidates, creates deterministic brackets once, sets a
+distinct annotator identity, and resumes `rankings.db` in that folder. Moving the folder rebases
+validated asset paths without deleting judgments. Export writes to that folder's `exports/`.
+Share `teammate.zip`; receive her exported JSONL/CSV and retain rankings.db as a backup.
+No labels or personal annotation databases are included in the initial ZIPs. Existing local
+rankings and datasets are untouched. Assignment mode hides manual importing/source review.
+
 ### Automatic annotation queue
 
 Launch the UI and click **Start / resume all layouts** in the Tournament tab.

@@ -10,19 +10,20 @@ DEFAULT_SIZE = 8
 
 
 def round_count(size: int) -> int:
-    if size not in SIZES:
-        raise ValueError(f"tournament size must be one of {SIZES}")
-    return size.bit_length() - 1
+    if not isinstance(size, int) or not 2 <= size <= 16:
+        raise ValueError("tournament size must be between 2 and 16")
+    return (size - 1).bit_length()
 
 
 def round_name(round_no: int, size: int) -> str:
-    remaining = size >> (round_no - 1)
+    remaining = (1 << round_count(size)) >> (round_no - 1)
     return {2: "Final", 4: "Semifinals", 8: "Quarterfinals", 16: "Round of 16"}[remaining]
 
 
 def bracket_slots(size: int) -> list[tuple[int, int]]:
     """(round, position) for every bracket match, in play order."""
-    return [(r, p) for r in range(1, round_count(size) + 1) for p in range(size >> r)]
+    capacity = 1 << round_count(size)
+    return [(r, p) for r in range(1, round_count(size) + 1) for p in range(capacity >> r)]
 
 
 def feeders(round_no: int, position: int) -> tuple[tuple[int, int], tuple[int, int]]:

@@ -29,6 +29,19 @@ def reject_source(conn, tid: str) -> None:
 
 
 def next_task(conn, annotator="local_annotator") -> tuple[str | None, str]:
+    if store.get_meta(conn, "assignment_id"):
+        rows = conn.execute("SELECT tournament_id FROM tournaments ORDER BY source_design_id, target_width, target_height, tournament_id").fetchall()
+        done = excluded = 0
+        for row in rows:
+            state = store.load_state(conn, row[0])
+            if rejected(conn, state.tournament["source_design_id"]):
+                excluded += 1
+            elif state.complete:
+                done += 1
+            else:
+                store.set_meta(conn, "last_tournament", row[0])
+                return row[0], f"Queue: {done} completed sets; {excluded} excluded; {len(rows)} total. Progress saves automatically."
+        return None, f"Queue finished: {done} completed sets; {excluded} excluded."
     groups = conn.execute(
         "SELECT source_design_id, target_width, target_height, MIN(source_path) source_path "
         "FROM candidates GROUP BY source_design_id, target_width, target_height "

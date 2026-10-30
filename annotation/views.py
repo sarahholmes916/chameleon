@@ -60,7 +60,7 @@ def label_of(state: store.TournamentState, candidate_id: str | None) -> str:
 def match_title(state: store.TournamentState, m: store.MatchView) -> str:
     size = state.tournament["size"]
     if m.kind == "bracket":
-        n = size >> m.round
+        n = (1 << bracket.round_count(size)) >> m.round
         return f"{bracket.round_name(m.round, size)} {m.position + 1}" if n > 1 else "Final"
     return ("Repeat " if m.kind == "repeat" else "Extra ") + str(m.position)
 
@@ -75,7 +75,7 @@ def header_md(state: store.TournamentState, focus: store.MatchView | None) -> st
         lines.append(f"### 🏆 Champion: {label_of(state, state.champion)}")
     if focus is not None:
         if focus.kind == "bracket":
-            order = [m.match_id for m in state.bracket()]
+            order = [m.match_id for m in state.bracket() if m.status != "bye"]
             line = f"### {match_title(state, focus)} · match {order.index(focus.match_id) + 1} of {total}"
             if done:
                 line += f" · {done} already decided" + (" (resumed)" if not state.complete else "")
@@ -103,7 +103,7 @@ def _card(state, conn, m: store.MatchView, current_id: str | None) -> str:
         rows.append(f'<div class="c{win}"><img src="{uri}"><b>{label_of(state, cid)}</b></div>')
     note = {"unresolved": f"{LABELS.get(m.judgment['label'], '')} · unresolved" if m.judgment else "",
             "resolved": f"{LABELS.get(m.judgment['label'], '')} → manual advance" if m.judgment else "",
-            "ready": "up next" if m.match_id == current_id else "", "decided": "", "waiting": ""}[m.status]
+            "ready": "up next" if m.match_id == current_id else "", "decided": "", "waiting": "", "bye": "bye (no judgment)"}[m.status]
     return f'<div class="{" ".join(cls)}">{"".join(rows)}<div class="n">{html.escape(note)}</div></div>'
 
 
@@ -111,7 +111,7 @@ def bracket_html(conn, state: store.TournamentState, current_id: str | None) -> 
     size = state.tournament["size"]
     columns = []
     for r in range(1, bracket.round_count(size) + 1):
-        cards = "".join(_card(state, conn, state.by_slot(r, p), current_id) for p in range(size >> r))
+        cards = "".join(_card(state, conn, state.by_slot(r, p), current_id) for p in range((1 << bracket.round_count(size)) >> r))
         columns.append(f'<div class="rd"><div class="rt">{bracket.round_name(r, size)}</div>{cards}</div>')
     champ = '<div class="c tbd">TBD</div>'
     if state.champion:

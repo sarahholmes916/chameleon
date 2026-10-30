@@ -216,7 +216,8 @@ def load_state(conn, tournament_id: str) -> TournamentState:
         mid = row["match_id"]
         if row["kind"] == "bracket":
             if row["round"] == 1:
-                a, b = entrants[2 * row["position"]], entrants[2 * row["position"] + 1]
+                padded = entrants + (None,) * ((1 << bracket.round_count(t["size"])) - len(entrants))
+                a, b = padded[2 * row["position"]], padded[2 * row["position"] + 1]
             else:
                 fa, fb = bracket.feeders(row["round"], row["position"])
                 a = views[f"{tournament_id}:r{fa[0]}m{fa[1]}"].winner
@@ -229,7 +230,12 @@ def load_state(conn, tournament_id: str) -> TournamentState:
             winner = {"A_BETTER": a, "B_BETTER": b}.get(j["label"])
             if winner is None and res is not None and row["kind"] == "bracket":
                 winner = res["winner_candidate_id"]
-        if a is None or b is None:
+        # Only structurally empty branches are byes. Pending decisions are not.
+        span = 1 << row["round"] if row["kind"] == "bracket" else 0
+        is_bye = bool(span and row["position"] * span + span // 2 >= len(entrants))
+        if is_bye:
+            status, winner = "bye", a or b
+        elif a is None or b is None:
             status = "waiting"
         elif j is None:
             status = "ready"
@@ -395,5 +401,5 @@ def get_candidate(conn, candidate_id: str) -> sqlite3.Row:
 
 
 def progress(state: TournamentState) -> tuple[int, int]:
-    bracket_matches = state.bracket()
+    bracket_matches = [m for m in state.bracket() if m.status != "bye"]
     return sum(m.status in ("decided", "resolved") for m in bracket_matches), len(bracket_matches)

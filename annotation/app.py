@@ -25,7 +25,7 @@ REASON_CHOICES = [("Text too small", "text_too_small"), ("Text overflow", "text_
 QUEUES = ["Bracket", "Extra & repeat comparisons"]
 
 
-def build_app(db_path: Path | str) -> gr.Blocks:
+def build_app(db_path: Path | str, *, assignment_root: Path | None = None, default_annotator="local_annotator") -> gr.Blocks:
     db_path = Path(db_path)
 
     def conn():
@@ -99,7 +99,8 @@ def build_app(db_path: Path | str) -> gr.Blocks:
 
     def on_start_queue(annotator, zoom):
         c = conn()
-        problems = work_queue.sync(c, REPO_ROOT)
+        # Shared assignment sessions must never import unrelated local datasets.
+        problems = [] if assignment_root else work_queue.sync(c, REPO_ROOT)
         store.set_meta(c, "automatic_queue", "yes")
         tid, message = work_queue.next_task(c, annotator or "local_annotator")
         if problems:
@@ -195,6 +196,8 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                 "Lists refreshed. New candidate manifests appear in the first dropdown; import one, then pick it below.")
 
     def on_import(path):
+        if assignment_root:
+            return "This session is limited to your assigned layouts.", gr.update()
         if not path:
             return "Choose a candidate_manifest.jsonl.", gr.update()
         try:
@@ -232,7 +235,8 @@ def build_app(db_path: Path | str) -> gr.Blocks:
         return (preferred or found or [None])[-1].parent.relative_to(REPO_ROOT).as_posix() if found else ""
 
     def sources_view(root, index):
-        sources = source_review.load_sources(candidates.resolve(root))
+        resolved_root = candidates.resolve(root)
+        sources = source_review.load_sources(resolved_root) if (resolved_root / "manifest.jsonl").is_file() else []
         if not sources:
             return gr.update(choices=[], value=None), None, "No sources.", "pending", "", 0
         index = max(0, min(int(index or 0), len(sources) - 1))
@@ -278,7 +282,7 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                 if made else "No eligible pairs yet (finish more bracket matches, or nothing left to compare).")
 
     def on_export(tid, scope, include_voided):
-        out = REPO_ROOT / "data/exports"
+        out = assignment_root / "exports" if assignment_root else REPO_ROOT / "data/exports"
         result = export.export_comparisons(conn(), out, tid if scope.startswith("This") else None,
                                            include_voided=include_voided, stem=f"comparisons_{tid}" if scope.startswith("This") else "comparisons_all")
         return f"Exported {result['comparisons']} comparison(s):\n\n- `{result['jsonl']}`\n- `{result['csv']}`\n- `{result['candidate_manifest']}`"
@@ -307,7 +311,7 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                     tournament_dd = gr.Dropdown(label="Tournament", choices=[], scale=3)
                     queue = gr.Radio(QUEUES, value=QUEUES[0], label="Queue", scale=2)
                     zoom = gr.Radio(list(views.ZOOMS), value="Fit", label="Zoom (both sides)", scale=3)
-                    annotator = gr.Textbox(value="local_annotator", label="Annotator ID", scale=1)
+                    annotator = gr.Textbox(value=default_annotator, label="Annotator ID", scale=1, interactive=not bool(assignment_root))
                 header = gr.Markdown()
                 bracket_view = gr.HTML()
                 with gr.Row():
@@ -334,7 +338,7 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                     btn_redo = gr.Button("Redo this match", interactive=False)
                     focus_dd = gr.Dropdown(label="Show match", choices=[], scale=3)
                 gr.Markdown("Keyboard: ← A wins · → B wins · T tie · B both bad · S skip · U undo")
-            with gr.Tab("New tournament", id="tab_new"):
+            with gr.Tab("New tournament", id="tab_new", visible=not bool(assignment_root)):
                 gr.Markdown("A tournament uses candidates of **one source and one target**. Import a `candidate_manifest.jsonl` "
                             "from the dev generator (or S04); every record is re-validated.")
                 with gr.Row():
@@ -350,7 +354,7 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                     allow = gr.Checkbox(False, label="Development override: allow a source that is not approved")
                 create_btn = gr.Button("Create tournament", variant="primary")
                 create_msg = gr.Markdown()
-            with gr.Tab("Source review", id="tab_sources"):
+            with gr.Tab("Source review", id="tab_sources", visible=not bool(assignment_root)):
                 gr.Markdown("Review the original generated designs. These are **sources, not tournament candidates**; nothing is approved automatically.")
                 with gr.Row():
                     dataset_box = gr.Dropdown(value=default_dataset(), choices=discovered_datasets(), allow_custom_value=True,
@@ -383,7 +387,7 @@ def build_app(db_path: Path | str) -> gr.Blocks:
                     include_voided = gr.Checkbox(False, label="Include voided (undone) rows")
                     export_btn = gr.Button("Export JSONL + CSV")
                 export_msg = gr.Markdown()
-            with gr.Tab("Validator diagnostics", id="tab_diag"):
+            with gr.Tab("Validator diagnostics", id="tab_diag", visible=not bool(assignment_root)):
                 gr.Markdown("Deliberately invalid outputs and what the S02 validator said. Separate from preference labels.")
                 diag_dd = gr.Dropdown(label="Candidate set", choices=diagnostics_sets(), allow_custom_value=True)
                 diag_table = gr.Dataframe(headers=["Case", "Expected violation", "Validator said", "Outcome"], interactive=False, wrap=True)
@@ -431,10 +435,17 @@ def main(argv=None) -> int:
     parser.add_argument("--db", type=Path, default=Path(os.environ.get("CHAMELEON_ANNOTATION_DB", store.DEFAULT_DB)))
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--assignment", type=Path, help="Portable assignment folder; isolates data and annotator identity")
     args = parser.parse_args(argv)
     db = args.db if args.db.is_absolute() else REPO_ROOT / args.db
+    annotator_id = "local_annotator"
+    if args.assignment:
+        from annotation.assignment import prepare_assignment
+        args.assignment = args.assignment.resolve()
+        db, annotator_id = prepare_assignment(args.assignment)
     print(f"Annotation database: {db}")
-    build_app(db).launch(server_name="127.0.0.1", server_port=args.port, inbrowser=not args.no_browser)
+    build_app(db, assignment_root=args.assignment, default_annotator=annotator_id).launch(
+        server_name="127.0.0.1", server_port=args.port, inbrowser=not args.no_browser)
     return 0
 
 

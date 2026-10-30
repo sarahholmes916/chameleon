@@ -86,7 +86,7 @@ def test_creation_and_deterministic_seeding(db):
         assert len(state.bracket()) == matches and len(state.entrants) == size
     assert [s for s in bracket.bracket_slots(16)].__len__() == 15
     with pytest.raises(ValueError):
-        new_tournament(conn, ids, size=6)
+        new_tournament(conn, ids, size=17)
     with pytest.raises(ValueError):
         new_tournament(conn, ids[:5], size=8)
 
