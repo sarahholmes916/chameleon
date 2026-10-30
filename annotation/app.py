@@ -40,9 +40,10 @@ def build_app(db_path: Path | str, *, assignment_root: Path | None = None, defau
         c = conn()
         choices = tournament_choices(c)
         off = gr.update(interactive=False)
+        assignment_header = work_queue.assignment_progress(c) if assignment_root else ""
         if not tid:
             return (None, gr.update(choices=choices, value=None), gr.update(choices=[], value=None),
-                    "### No tournament yet\nUse the **New tournament** tab to import a candidate set and start one.",
+                    assignment_header or "### No tournament yet\nUse the **New tournament** tab to import a candidate set and start one.",
                     "", "", "", off, off, off, off, off, gr.update(visible=False), gr.update(visible=False), off, off,
                     gr.update(value=[]), message, None, "", [])
         state = store.load_state(c, tid)
@@ -78,7 +79,8 @@ def build_app(db_path: Path | str, *, assignment_root: Path | None = None, defau
             left_html = right_html = views.viewer_html(None, "", zoom)
         vote = gr.update(interactive=buttons["vote"])
         return (tid, gr.update(choices=choices, value=tid), gr.update(choices=match_choices, value=focus.match_id if focus else None),
-                views.header_md(state, focus), views.bracket_html(c, state, focus.match_id if focus else None),
+                (assignment_header + "\n\n" if assignment_header else "") + views.header_md(state, focus),
+                views.bracket_html(c, state, focus.match_id if focus else None),
                 left_html, right_html, vote, vote, vote, vote, vote,
                 gr.update(visible=buttons["resolve"]), gr.update(visible=buttons["resolve"]),
                 gr.update(interactive=buttons["redo"]), gr.update(interactive=any(

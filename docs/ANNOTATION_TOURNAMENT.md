@@ -43,6 +43,13 @@ python -m venv .venv
 The launcher imports only its assigned candidates, creates deterministic brackets once, sets a
 distinct annotator identity, and resumes `rankings.db` in that folder. Moving the folder rebases
 validated asset paths without deleting judgments. Export writes to that folder's `exports/`.
+The persistent **Your assignment progress** header above the bracket shows remaining comparisons
+and brackets, completed counts, and excluded brackets. It refreshes after votes, undo, and reload.
+Rejected sources and structural byes do not count as remaining comparisons. Saved ties, skips,
+and both-bad responses remain pending until an advancement choice resolves the match.
+The comparison panels use full-resolution PNGs. **Fit** shrinks wide previews to the panel
+but never enlarges them beyond their native width. Use **100% (actual pixels)** to inspect
+text at native resolution, with scrolling; **200%** intentionally enlarges raster pixels.
 Share `teammate.zip`; receive her exported JSONL/CSV and retain rankings.db as a backup.
 No labels or personal annotation databases are included in the initial ZIPs. Existing local
 rankings and datasets are untouched. Assignment mode hides manual importing/source review.

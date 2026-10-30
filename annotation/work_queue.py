@@ -23,6 +23,29 @@ def rejected(conn, source_id: str) -> bool:
     return store.get_meta(conn, "queue_rejected_source:" + source_id) == "yes"
 
 
+def assignment_progress(conn) -> str:
+    """Persistent progress from saved bracket decisions; exclude rejected sources and byes."""
+    completed = excluded = decisions = total = remaining_sets = unresolved = 0
+    rows = conn.execute("SELECT tournament_id FROM tournaments").fetchall()
+    for row in rows:
+        state = store.load_state(conn, row[0])
+        if rejected(conn, state.tournament["source_design_id"]):
+            excluded += 1
+            continue
+        done, count = store.progress(state)
+        decisions += done
+        total += count
+        unresolved += len(state.unresolved())
+        completed += int(state.complete)
+        remaining_sets += int(not state.complete)
+    text = (f"## Your assignment progress\n"
+            f"**{total - decisions} comparisons remaining** · {decisions} of {total} completed\n\n"
+            f"**{remaining_sets} brackets remaining** · {completed} completed · {excluded} excluded · {len(rows)} assigned")
+    if unresolved:
+        text += f"\n\n{unresolved} saved responses still need an advancement choice and are included in the remaining count."
+    return text
+
+
 def reject_source(conn, tid: str) -> None:
     source_id = store.load_state(conn, tid).tournament["source_design_id"]
     store.set_meta(conn, "queue_rejected_source:" + source_id, "yes")

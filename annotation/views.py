@@ -48,7 +48,8 @@ def viewer_html(path: str | Path | None, caption: str, zoom: str = "Fit") -> str
         return f'<div class="cv"><div class="cap">{html.escape(caption)}</div><div class="empty">No match</div></div>'
     uri, width, _ = image_uri(path)
     factor = ZOOMS.get(zoom)
-    style = "width:100%" if factor is None else f"width:{round(width * factor)}px;max-width:none"
+    # Fit may shrink a large canvas, but must not magnify narrow raster previews.
+    style = f"width:100%;max-width:{width}px" if factor is None else f"width:{round(width * factor)}px;max-width:none"
     return (f'<div class="cv"><div class="cap">{html.escape(caption)}</div>'
             f'<div class="scroll"><img src="{uri}" style="{style}" alt="{html.escape(caption)}"></div></div>')
 

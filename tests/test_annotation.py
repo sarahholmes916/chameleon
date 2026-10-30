@@ -356,6 +356,23 @@ def test_invalid_cases_stay_out_of_the_candidate_manifest(world):
     assert invalid_cases(json.loads(source_path.read_text()), TARGET)[0]["name"] == "stretch_to_target"
 
 
+def test_fit_does_not_enlarge_narrow_previews(tmp_path):
+    import base64
+    import io
+    import re
+    from PIL import Image
+
+    path = tmp_path / "narrow.png"
+    Image.new("RGB", (90, 728), "white").save(path)
+    page = views.viewer_html(path, "Candidate A", "Fit")
+    assert "width:100%;max-width:90px" in page
+    encoded = re.search(r'data:image/png;base64,([^\"]+)', page).group(1)
+    with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
+        assert image.size == (90, 728)
+    assert "width:90px;max-width:none" in views.viewer_html(path, "A", "100% (actual pixels)")
+    assert "width:180px;max-width:none" in views.viewer_html(path, "A", "200%")
+
+
 def test_hidden_information_never_reaches_annotator_html(db):
     conn, ids, _ = db
     tid = new_tournament(conn, ids)

@@ -127,8 +127,32 @@ def test_assignment_ui_cannot_import_other_datasets(task, tmp_path, monkeypatch)
     try:
         handlers = {getattr(fn.fn, "__name__", ""): fn for fn in demo.fns.values()}
         result = handlers["on_start_queue"].fn(name, "Fit")
+        assert "3 comparisons remaining" in result[3]
+        assert "1 brackets remaining" in result[3]
         assert result[18]["status"] == "ready"
         assert "Original source design" in result[19]
         assert "limited" in handlers["on_import"].fn("unrelated.jsonl")[0]
     finally:
         demo.close()
+
+
+def test_assignment_progress_updates_and_excludes_rejected_sources(task, tmp_path):
+    folder = tmp_path / "progress"
+    write_package(folder, [task], set(), "alice", include_app=False)
+    conn = store.connect(prepare_assignment(folder)[0])
+    tid = store.list_tournaments(conn)[0]["tournament_id"]
+    m = store.load_state(conn, tid).next_match()
+    store.record_judgment(conn, tid, m.match_id, "TIE", presented_left=m.left,
+                          presented_right=m.right, token=m.token, annotator_id="alice")
+    assert "3 comparisons remaining" in work_queue.assignment_progress(conn)
+    assert "1 saved responses still need" in work_queue.assignment_progress(conn)
+    store.resolve_match(conn, tid, m.match_id, m.a, "alice")
+    assert "2 comparisons remaining" in work_queue.assignment_progress(conn)
+    store.undo_last(conn, tid, "alice")
+    assert "3 comparisons remaining" in work_queue.assignment_progress(conn)
+    work_queue.reject_source(conn, tid)
+    progress = work_queue.assignment_progress(conn)
+    assert "0 comparisons remaining" in progress
+    assert "0 brackets remaining" in progress
+    assert "1 excluded" in progress
+    conn.close()
