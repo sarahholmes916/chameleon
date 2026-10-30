@@ -21,6 +21,7 @@ from engine.candidate_generator import (
     FILL_EDGE_TOLERANCE_PX,
     FLOW_MAX_SINGLE_BAND_UNITS,
     FONT_GROWTH_CAP,
+    FONT_RATIO_TOLERANCE,
     GENERATOR_VERSION,
     HERO_FLOOR_FRACTION,
     HERO_MAX_SINGLE_COLUMN_UNITS,
@@ -312,10 +313,10 @@ def test_validity_grid_all_fixtures_families_modes(name, family):
 @pytest.mark.parametrize(("name", "family", "count"), [
     ("chameleon_sample_level1_warmup.json", FAMILY_HERO_LEFT, 3),
     ("chameleon_sample_level1_warmup.json", FAMILY_HERO_RIGHT, 3),
-    ("chameleon_sample_level1_warmup.json", FAMILY_BANNER_ZONES, 3),
+    ("chameleon_sample_level1_warmup.json", FAMILY_BANNER_ZONES, 1),
     ("chameleon_sample_level2_core.json", FAMILY_HERO_LEFT, 6),
     ("chameleon_sample_level2_core.json", FAMILY_HERO_RIGHT, 6),
-    ("chameleon_sample_level2_core.json", FAMILY_BANNER_ZONES, 4),
+    ("chameleon_sample_level2_core.json", FAMILY_BANNER_ZONES, 2),
     ("chameleon_sample_level3_advanced.json", FAMILY_HERO_LEFT, 4),
     ("chameleon_sample_level3_advanced.json", FAMILY_HERO_RIGHT, 4),
     ("chameleon_sample_level3_advanced.json", FAMILY_BANNER_ZONES, 4),
@@ -901,16 +902,64 @@ def test_label_block_swaps_vary_l3_column_order():
 def test_banner_zones_order_and_differ_from_hero():
     source, target = load_sample("chameleon_sample_level2_core.json")
     zones = banner_zones_candidates(source, target)
-    assert len(zones) == 4
+    assert len(zones) == 2
     placed = boxes_by_id(zones[0])
-    assert (center_x(placed["badge_bg"]) < center_x(placed["product"])
-            < center_x(placed["headline"]) < center_x(placed["cta_bg"]))
+    assert (center_x(placed["logo"]) < center_x(placed["product"])
+            < center_x(placed["headline"]) < center_x(placed["badge_bg"])
+            < center_x(placed["cta_bg"]))
+    product = placed["product"]
     for rider_id in ("deco_circle_1", "deco_circle_2"):
+        rider = placed[rider_id]
+        assert 0.0 <= rider["x"]
+        assert 0.0 <= rider["y"]
+        assert rider["x"] + rider["width"] <= target.width
+        assert rider["y"] + rider["height"] <= target.height
         for other_id in TEXT_AND_PILL_IDS:
-            assert not boxes_overlap(placed[rider_id], placed[other_id]), (
+            assert not boxes_overlap(rider, placed[other_id]), (
                 rider_id, other_id)
+    wash = placed["deco_circle_2"]
+    assert center_x(wash) > center_x(product)
+    assert center_y(wash) > center_y(product)
     hero = boxes_by_id(hero_left_candidates(source, target)[0])
     assert zones[0] != hero
+
+
+def test_pill_labels_centered_in_shapes_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    candidates = [hero_left_candidates(source, target)[0],
+                  banner_zones_candidates(source, target)[0]]
+    for candidate in candidates:
+        placed = boxes_by_id(candidate)
+        for shape_id, label_id in (("badge_bg", "badge_label"),
+                                   ("cta_bg", "cta_label")):
+            shape, label = placed[shape_id], placed[label_id]
+            assert abs(center_x(label) - center_x(shape)) <= 1.0
+            assert abs(center_y(label) - center_y(shape)) <= 1.0
+            assert shape["x"] <= label["x"]
+            assert shape["y"] <= label["y"]
+            assert (label["x"] + label["width"]
+                    <= shape["x"] + shape["width"])
+            assert (label["y"] + label["height"]
+                    <= shape["y"] + shape["height"])
+
+
+def test_hierarchy_ratios_capped_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    sizes = {element.id: float(element.font_size)
+             for element in source.elements if element.type == "text"}
+    largest_id = max(sizes, key=lambda key: sizes[key])
+    candidates = [hero_left_candidates(source, target)[0],
+                  banner_zones_candidates(source, target)[0]]
+    for candidate in candidates:
+        placed = boxes_by_id(candidate)
+        top = placed[largest_id]["font_size"]
+        for text_id, size in sizes.items():
+            if text_id == largest_id:
+                continue
+            assert placed[text_id]["font_size"] < top
+            assert placed[text_id]["font_size"] <= (
+                size / sizes[largest_id] * top
+                * (1 + FONT_RATIO_TOLERANCE))
 
 
 def test_overlay_without_image_target_stays_capped_and_disjoint():

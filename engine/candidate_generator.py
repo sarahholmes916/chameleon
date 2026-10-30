@@ -78,6 +78,7 @@ __all__ = [
     "FONT_GROWTH_CAP",
     "FONT_GROWTH_STEP",
     "FONT_GROWTH_STEPS",
+    "FONT_RATIO_TOLERANCE",
     "FONT_SHRINK_STEP",
     "GENERATOR_VERSION",
     "HERO_FLOOR_FRACTION",
@@ -89,6 +90,7 @@ __all__ = [
     "MIN_UNIT_SCALE",
     "OVERLAY_OPACITY_THRESHOLD",
     "PILL_ASPECT_TOLERANCE",
+    "PILL_LABEL_PADDING_FRACTION",
     "PORTRAIT_ASPECT_CUTOFF",
     "SAFE_BOTTOM_MARGIN_FACTOR",
     "SLOT_DIRECTION_HORIZONTAL",
@@ -150,6 +152,9 @@ FONT_GROWTH_STEP = 1.1
 FONT_GROWTH_STEPS = 4
 FONT_GROWTH_CAP = 1.5
 FONT_SHRINK_STEP = 0.9
+# Slack on exact source-ratio font caps: float dust from seed/cap arithmetic
+# only, far below one ladder rung (10%), never a visible size step.
+FONT_RATIO_TOLERANCE = 1e-9
 # Hero panel share of the usable width (D.1.2: dominant region plus the rest;
 # the even split is ours -- no generic signal picks a lopsided share).
 HERO_SIDE_FRACTION = 0.5
@@ -205,6 +210,10 @@ HERO_FLOOR_FRACTION = 0.6
 # Two pill units read as near-identical when their relative aspect differs
 # by at most this (same-component tolerance, not a fixture fit).
 PILL_ASPECT_TOLERANCE = 0.10
+# Per-side inset of the label ink box inside its pill shape, as a fraction of
+# each shape axis: scale-invariant minimum air so label ink never touches the
+# pill edge at any target size.
+PILL_LABEL_PADDING_FRACTION = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,7 +490,11 @@ def _decide_font_sizes(source: Design,
     """Text sizes in descending source-size order under a running cap.
 
     Equal source sizes share one cap update, so source ties stay
-    unconstrained; every decision feeds the cap for smaller texts.
+    unconstrained; every decision feeds the cap for smaller texts. Past the
+    largest group, each text is additionally capped at its exact source-size
+    ratio to the largest text times the largest decided size, so no text can
+    outgrow its source proportion (the seed honors the ratio cap too; the
+    rank cap keeps its growth-only semantics).
     """
     ordered = sorted(
         ((element, position)
@@ -491,22 +504,34 @@ def _decide_font_sizes(source: Design,
     )
     fonts: dict[str, float] = {}
     cap = math.inf
+    largest_size = float(ordered[0][0].font_size) if ordered else 0.0
+    largest_decided: float | None = None
     start = 0
     while start < len(ordered):
         size = float(ordered[start][0].font_size)
         stop = start
         while stop < len(ordered) and float(ordered[stop][0].font_size) == size:
             stop += 1
+        group_cap = cap
+        ratio_cap: float | None = None
+        if largest_decided is not None and largest_size > 0:
+            ratio_cap = ((size / largest_size) * largest_decided
+                         * (1 + FONT_RATIO_TOLERANCE))
+            group_cap = min(group_cap, ratio_cap)
         decided = []
         for element, _ in ordered[start:stop]:
             placed = boxes[element.id]
             seed = max(1.0, float(element.font_size) * scales[element.id])
+            if ratio_cap is not None:
+                seed = min(seed, max(ratio_cap, 1.0))
             choice = _search_font_size(
                 element.content, placed[2], placed[3], seed,
-                float(element.effective_value("line_height")), cap,
+                float(element.effective_value("line_height")), group_cap,
             )
             fonts[element.id] = choice
             decided.append(choice)
+        if largest_decided is None:
+            largest_decided = min(decided)
         cap = min(cap, min(decided))
         start = stop
     return fonts
@@ -585,6 +610,9 @@ def _family_candidates(source: Design, target: Canvas, *,
             for element in unit.members:
                 scales[element.id] = scale
         fonts = _decide_font_sizes(source, boxes, scales)
+        _center_pill_labels(
+            [unit for unit in list(ordered) + fits if _is_pill_unit(unit)],
+            boxes, fonts)
         results.append(_emit_candidate(source, target, boxes, scales, fonts))
     return results
 
@@ -644,6 +672,40 @@ def _merge_pills(units: list[LayoutUnit], canvas: Canvas) -> list[LayoutUnit]:
         else:
             merged.append(unit)
     return merged
+
+
+def _center_pill_labels(pill_units: list[LayoutUnit],
+                        boxes: dict[str, tuple[float, float, float, float]],
+                        fonts: dict[str, float]) -> None:
+    """Center each pill label in its shape; fit its font with padding.
+
+    The label keeps its size and moves to the shape center on both axes when
+    it fits inside; its font only shrinks, to fit both the label box and the
+    padded shape inset. Hierarchy caps survive (shrinks only), and riders
+    stay clear (the label never leaves the shape avoid-box they cleared).
+    """
+    for unit in pill_units:
+        shape = next(member for member in unit.members
+                     if member.type == "shape")
+        label = next(member for member in unit.members
+                     if member.type == "text")
+        shape_box = boxes[shape.id]
+        label_box = boxes[label.id]
+        shape_w, shape_h = shape_box[2], shape_box[3]
+        label_w, label_h = label_box[2], label_box[3]
+        if label_w <= shape_w and label_h <= shape_h:
+            boxes[label.id] = (
+                shape_box[0] + (shape_w - label_w) / 2,
+                shape_box[1] + (shape_h - label_h) / 2,
+                label_w, label_h)
+        inset = 1 - 2 * PILL_LABEL_PADDING_FRACTION
+        fit_w = min(label_w, shape_w * inset)
+        fit_h = min(label_h, shape_h * inset)
+        if fit_w > 0 and fit_h > 0:
+            seed = fonts[label.id]
+            fonts[label.id] = _search_font_size(
+                label.content, fit_w, fit_h, seed,
+                float(label.effective_value("line_height")), seed)
 
 
 def _unit_line_height(unit: LayoutUnit) -> float:
@@ -1426,6 +1488,15 @@ def _run_pack_passes(
         for element in overlay.members:
             scales[element.id] = rider_scale
     fonts = _decide_font_sizes(source, boxes, scales)
+    pill_units: dict[int, LayoutUnit] = {}
+    for rows, _ in pack_jobs:
+        for row in rows:
+            if _is_pill_unit(row.unit):
+                pill_units[id(row.unit)] = row.unit
+    for unit, _, _ in fit_jobs:
+        if _is_pill_unit(unit):
+            pill_units[id(unit)] = unit
+    _center_pill_labels(list(pill_units.values()), boxes, fonts)
     return boxes, scales, fonts
 
 
@@ -1542,12 +1613,14 @@ def _zone_rects(ordered: list[LayoutUnit], target: Canvas) -> list[Slot]:
 
 
 def banner_zones_candidates(source: Design, target: Canvas) -> list[dict[str, Any]]:
-    """BANNER_ZONES: one band of content-sized zones in reading order.
+    """BANNER_ZONES: one band of content-sized zones, brand first, CTA last.
 
-    Every slotted non-small unit takes a zone sized by its source width with
-    packed rows inside; smalls anchor (source sides, no hero to oppose);
-    label/block orders vary like hero columns. Resize applies this family on
-    targets wider than FAMILY_ASPECT_CUTOFF.
+    The smallest-area image unit opens the band (brand zone), the pill
+    holding the last source-order text closes it, and content zones keep
+    source order between them; every zone is sized by its source width with
+    packed rows inside. Remaining smalls anchor (source sides, no hero to
+    oppose); label/block orders vary like hero columns. Resize applies this
+    family on targets wider than FAMILY_ASPECT_CUTOFF.
     """
     canvas = source.source_canvas
     canvas_area = float(canvas.width) * float(canvas.height)
@@ -1560,16 +1633,36 @@ def banner_zones_candidates(source: Design, target: Canvas) -> list[dict[str, An
         fills, fits, slotted = _partition_units(units, canvas)
         rider_ids = {id(overlay) for overlay, _ in riders}
         free = [unit for unit in slotted if id(unit) not in rider_ids]
+        image_units = [unit for unit in free if _has_image(unit)]
+        if image_units:
+            brand = min(image_units, key=lambda unit: (
+                unit.bbox[2] * unit.bbox[3], min(unit.source_indices)))
+        else:
+            brand = None
+        last_text_index = -1
+        for unit in free:
+            for member, index in zip(unit.members, unit.source_indices):
+                if member.type == "text":
+                    last_text_index = max(last_text_index, index)
+        call_to_action = None
+        if last_text_index >= 0:
+            for unit in free:
+                if (_is_pill_unit(unit)
+                        and last_text_index in unit.source_indices):
+                    call_to_action = unit
         smalls = sorted(
             (unit for unit in free
              if _has_image(unit)
-             and unit.bbox[2] * unit.bbox[3] < small_limit),
+             and unit.bbox[2] * unit.bbox[3] < small_limit
+             and unit is not brand),
             key=lambda unit: min(unit.source_indices))
         anchored, _ = _assign_small_corners(
             smalls, _small_prefs(smalls, canvas, mirror=False, has_hero=False))
         anchored_ids = {id(unit) for unit, _ in anchored}
         zone_base = [unit for unit in free if id(unit) not in anchored_ids]
-        base = sorted(zone_base, key=_order_key_flow)
+        base = sorted(zone_base, key=lambda unit: (
+            0 if unit is brand else 2 if unit is call_to_action else 1,
+            min(unit.source_indices)))
         orders = _distinct_orders(
             [_separate_pills(variant)
              for variant in _order_variants(base, block_keys)])
