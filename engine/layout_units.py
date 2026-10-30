@@ -69,6 +69,8 @@ __all__ = [
 BACKGROUND_AREA_FRACTION = 0.75
 COVER_BACKGROUND_AREA_FRACTION = 0.75
 ASSOCIATION_THRESHOLD = 0.75
+# Separate threshold for adjacent ungrouped text: no same-group/containment bonus.
+UNGROUPED_TEXT_THRESHOLD = 0.30
 ASSOCIATION_WEIGHT_SAME_GROUP = 0.40
 ASSOCIATION_WEIGHT_CONTAINS = 0.25
 ASSOCIATION_WEIGHT_PROXIMITY = 0.20
@@ -479,7 +481,15 @@ def build_layout_units(
                 left = ungrouped[left_pos]
                 right = ungrouped[right_pos]
                 score = association(elements[left], elements[right], canvas)
-                if score >= ASSOCIATION_THRESHOLD:
+                a, b = elements[left], elements[right]
+                # Only adjacent, separated text can be inferred as a rigid text block.
+                # Shapes/images/containment overlays need explicit group evidence.
+                gap = max(float(b.y - a.y - a.height), float(a.y - b.y - b.height), 0.0)
+                related_text = (a.type == b.type == "text" and is_aligned(a, b, canvas)
+                                and not contains_any(a, b) and element_iou(a, b) == 0
+                                and gap <= min(float(a.font_size), float(b.font_size)) * 1.2
+                                and normalized_center_distance(a, b, canvas) <= 0.06)
+                if related_text and score >= UNGROUPED_TEXT_THRESHOLD:
                     scored.append((-score, left, right))
         scored.sort()
         position_of = {pos: rank for rank, pos in enumerate(ungrouped)}

@@ -12,7 +12,7 @@ import csv
 import json
 from pathlib import Path
 
-from annotation import store
+from annotation import store, work_queue
 from annotation.bracket import round_name
 
 SCHEMA = "preference.v1"
@@ -21,7 +21,7 @@ CSV_FIELDS = (
     "bracket_position", "repeat_of", "source_design_id", "template_family_id", "split_group_id",
     "source_review_status", "target_width", "target_height", "candidate_a_id", "candidate_b_id",
     "screen_left_candidate_id", "screen_right_candidate_id", "label", "preferred_candidate_id",
-    "usable_for_pairwise_loss", "advancement_candidate_id", "advancement_method", "advancement_overrides_label",
+    "usable_for_pairwise_loss", "source_rejected_in_queue", "advancement_candidate_id", "advancement_method", "advancement_overrides_label",
     "reason_tags", "note", "annotator_id", "created_at_utc", "candidate_a_generator_version",
     "candidate_b_generator_version", "renderer_version", "ui_version", "voided", "void_reason")
 
@@ -62,7 +62,9 @@ def comparison_rows(conn, tournament_id: str | None = None, *, include_voided: b
             split_group_id=r["template_family_id"], source_review_status=r["source_review_status"],
             target_width=r["target_width"], target_height=r["target_height"], candidate_a_id=a, candidate_b_id=b,
             screen_left_candidate_id=r["screen_left_id"], screen_right_candidate_id=b if r["screen_left_id"] == a else a,
-            label=label, preferred_candidate_id=preferred, usable_for_pairwise_loss=label in store.DECISIVE,
+            label=label, preferred_candidate_id=preferred,
+            usable_for_pairwise_loss=label in store.DECISIVE and not work_queue.rejected(conn, r["source_design_id"]),
+            source_rejected_in_queue=work_queue.rejected(conn, r["source_design_id"]),
             advancement_candidate_id=advancement, advancement_method=method,
             advancement_overrides_label=method == "manual_resolution",
             reason_tags=json.loads(r["reason_tags"]), note=r["note"], annotator_id=r["annotator_id"],

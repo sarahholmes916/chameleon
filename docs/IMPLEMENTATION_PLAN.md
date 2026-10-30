@@ -168,3 +168,24 @@ these were checked by inspection or a one-off run, stated on each line; none is 
 - **PR checklist:** what changed; functions exposed; test command and observed result; limitations; effect on the other owner.
 - **Honest status:** mark only inspected, tested work complete.
 - **Agent instructions:** [AGENTS.md](../AGENTS.md) covers workflow; progress lives here, not duplicated across prompts.
+
+
+## S04 robustness and training-readiness update (2026-10-30)
+
+Implemented: reachable guarded ungrouped text clustering; bounded banner/packed gaps;
+family-isolated candidate pool; two-column and controlled-overlay families; S04-only word fitting
+and optional measured refinement; occlusion-sensitive objective v3; exact/near deduplication and
+family-balanced retention separate from production ranking; real-renderer benchmark/manifest export.
+Core and renderer tests are wired into the existing CI jobs. See [S04_EVALUATION.md](S04_EVALUATION.md).
+Still pending: human calibration of weights/spacing/readability, perceptual evaluation, continuous
+geometry optimization, broad unseen-design evaluation, and GNN training/integration. No training or
+model/graph changes are included. Existing annotation UI edits are preserved separately.
+
+## S04 shape stretching update (2026-10-30)
+
+Implemented: deterministic shape roles, independent-axis shape stretching as pool variants (`label_fit`,
+`panel_fill`, `axis_x`, `axis_y`, `balanced`), objective v4 (ellipse distortion, label padding symmetry,
+backdrop panels excluded from coverage/spacing/balance), variant provenance, shape-aware retention distinctness,
+generator v0.3. Tests: `tests/test_shape_stretch.py` (core), `tests/test_shape_stretch_graph.py` (ML). Evidence and
+limits: [S04_EVALUATION.md](S04_EVALUATION.md). No graph feature, ranker, checkpoint or label change.
+Still pending: human preference judgements on stretched vs proportional layouts and calibration of all new constants.

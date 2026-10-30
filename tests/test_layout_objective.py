@@ -116,7 +116,7 @@ def test_provisional_weights_match_spec():
 
 
 def test_objective_version_matches_cover_rebalance():
-    assert OBJECTIVE_VERSION == "objective_v2_cover"
+    assert OBJECTIVE_VERSION == "objective_v4_shape"
 
 
 def test_weights_must_sum_to_one():
@@ -140,7 +140,7 @@ def test_no_ml_dependencies_by_ast():
     assert modules <= {
         "__future__", "logging", "math", "collections.abc", "dataclasses",
         "typing", "engine.internal_schema", "engine.layout_units",
-        "engine.text_fit",
+        "engine.shape_roles", "engine.text_fit",
     }
 
 

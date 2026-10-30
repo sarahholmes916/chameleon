@@ -68,6 +68,8 @@ __all__ = [
     "DETACHED_OVERLAY_MAX_FRACTION",
     "FAMILY_ASPECT_CUTOFF",
     "FAMILY_BANNER_ZONES",
+    "FAMILY_TWO_COLUMN",
+    "FAMILY_CONTROLLED_OVERLAY",
     "FAMILY_HERO_LEFT",
     "FAMILY_HERO_RIGHT",
     "FAMILY_HORIZONTAL_FLOW",
@@ -107,6 +109,8 @@ __all__ = [
     "Slot",
     "allocate_slots",
     "banner_zones_candidates",
+    "two_column_candidates",
+    "controlled_overlay_candidates",
     "baseline_candidate",
     "hero_left_candidates",
     "hero_right_candidates",
@@ -124,7 +128,7 @@ FAMILY_BANNER_ZONES = "BANNER_ZONES"
 # below it, banner zones apply above it, and resize batch assembly skips
 # VERTICAL_STACK above it / HORIZONTAL_FLOW below its reciprocal.
 FAMILY_ASPECT_CUTOFF = 2.0
-GENERATOR_VERSION = "s04_generator_v0.1"
+GENERATOR_VERSION = "s04_generator_v0.3"
 
 SLOT_DIRECTION_HORIZONTAL = "horizontal"
 SLOT_DIRECTION_VERTICAL = "vertical"
@@ -590,7 +594,8 @@ def _emit_candidate(source: Design, target: Canvas,
 
 
 def _family_candidates(source: Design, target: Canvas, *,
-                       direction: str) -> list[dict[str, Any]]:
+                       direction: str, slot_allocator=allocate_slots,
+                       unit_builder=build_layout_units) -> list[dict[str, Any]]:
     """One Adobe dict per group mode, slotted along the family direction."""
     order = _order_key_flow if direction == SLOT_DIRECTION_HORIZONTAL else _order_key_stack
     canvas = source.source_canvas
@@ -598,10 +603,10 @@ def _family_candidates(source: Design, target: Canvas, *,
     target_h = float(target.height)
     results = []
     for mode in required_group_modes(source):
-        units = build_layout_units(source, group_mode=mode)
+        units = unit_builder(source, group_mode=mode)
         fills, fits, slotted = _partition_units(units, canvas)
         ordered = sorted(slotted, key=order)
-        slots = allocate_slots(len(ordered), target, direction=direction)
+        slots = slot_allocator(len(ordered), target, direction=direction)
         boxes: dict[str, tuple[float, float, float, float]] = {}
         scales: dict[str, float] = {}
         for unit, slot in zip(ordered, slots):
@@ -1110,10 +1115,10 @@ def _pack_container(rows: list[_PackedRow], rect: Slot,
     (ink-tight, so box gaps are visual gaps); pills render at natural size at
     most; independent overlays are capped to the detached fraction; images and
     shapes width-fit. Inner gaps separate block siblings, outer gaps separate
-    blocks and units, all exact and never clamped; the stack centers exactly
-    in the rect inset by the edge floors (the bottom margin plus an inner em
-    in the end rows' sizes at each end), shrinking rows — never gaps, floors,
-    or marks — when short. Returns row slots and scales in row order.
+    blocks and units; gaps shrink to a bounded budget on constrained canvases.
+    The stack centers inside the preferred optical edge floors. Those floors
+    yield if they leave no content space; rows shrink after the bounded gap
+    allocation. Empty containers reject the proposal. Returns slots and scales.
     """
     if not rows:
         return [], []
@@ -1144,8 +1149,17 @@ def _pack_container(rows: list[_PackedRow], rect: Slot,
     space_bottom = min(float(rect.y + rect.height),
                        float(target.height) - edge
                        - BLOCK_INNER_GAP_EM * row_fonts[-1])
+    # Optical margins are preferences: shrink them before consuming all content.
+    if space_bottom <= space_top:
+        space_top, space_bottom = float(rect.y), float(rect.y + rect.height)
     space = max(0.0, space_bottom - space_top)
+    if col_w <= 0 or space <= 0:
+        raise ValueError("packed container has no positive content area")
     total_gaps = sum(gaps)
+    gap_budget = space * 0.20
+    if total_gaps > gap_budget:
+        gaps = [gap * gap_budget / total_gaps for gap in gaps]
+        total_gaps = sum(gaps)
     total_rows = sum(heights)
     if total_rows > 0 and total_rows + total_gaps > space:
         factor = max(0.0, (space - total_gaps) / total_rows)
@@ -1819,11 +1833,29 @@ def _zone_rects(ordered: list[LayoutUnit], target: Canvas) -> list[Slot]:
     count = len(ordered)
     if count == 0:
         return []
-    gap = usable_w * COLUMN_GAP_FRACTION
-    total = sum(float(unit.bbox[2]) for unit in ordered)
+    # Wrap dense bands; never spend more than 20% of either axis on gaps.
+    columns = min(count, max(1, int(math.ceil(math.sqrt(count * usable_w / usable_h)))))
+    if columns < count:
+        rows = math.ceil(count / columns)
+        row_gap = min(usable_h * BAND_GAP_FRACTION, usable_h * 0.2 / max(1, rows - 1))
+        row_h = (usable_h - row_gap * (rows - 1)) / rows
+        rects = []
+        for start in range(0, count, columns):
+            band = ordered[start:start + columns]
+            gap = min(usable_w * COLUMN_GAP_FRACTION, usable_w * 0.2 / max(1, len(band) - 1))
+            net = usable_w - gap * (len(band) - 1)
+            weights = [max(float(unit.bbox[2]), 1.0) for unit in band]
+            left = origin_x
+            for weight in weights:
+                width = net * weight / sum(weights)
+                rects.append(Slot(left, origin_y + (start // columns) * (row_h + row_gap), width, row_h))
+                left += width + gap
+        return rects
+    gap = min(usable_w * COLUMN_GAP_FRACTION, usable_w * 0.2 / max(1, count - 1))
+    total = sum(max(float(unit.bbox[2]), 1.0) for unit in ordered)
     net = usable_w - gap * (count - 1)
     if total > 0:
-        widths = [net * float(unit.bbox[2]) / total for unit in ordered]
+        widths = [net * max(float(unit.bbox[2]), 1.0) / total for unit in ordered]
     else:
         widths = [net / count] * count
     rects = []
@@ -1924,3 +1956,60 @@ def hero_left_candidates(source: Design, target: Canvas) -> list[dict[str, Any]]
 def hero_right_candidates(source: Design, target: Canvas) -> list[dict[str, Any]]:
     """HERO_RIGHT: mirror of HERO_LEFT (hero panel right, column left)."""
     return _hero_candidates(source, target, mirror=True)
+
+
+FAMILY_TWO_COLUMN = "TWO_COLUMN"
+FAMILY_CONTROLLED_OVERLAY = "CONTROLLED_OVERLAY"
+
+
+def _two_column_slots(count: int, target: Canvas, *, direction: str) -> list[Slot]:
+    if count < 2:
+        return allocate_slots(count, target, direction=direction)
+    x, y, width, height = _usable_rect(target)
+    gap = width * COLUMN_GAP_FRACTION
+    column_width = (width - gap) / 2
+    slots = []
+    for index in range(count):
+        column = index % 2
+        rows = (count + 1 - column) // 2
+        row_gap = min(height * BAND_GAP_FRACTION, height * .2 / max(1, rows - 1))
+        row_height = (height - row_gap * (rows - 1)) / rows
+        slots.append(Slot(x + column * (column_width + gap),
+                          y + (index // 2) * (row_height + row_gap), column_width, row_height))
+    return slots
+
+
+def two_column_candidates(source: Design, target: Canvas) -> list[dict[str, Any]]:
+    return _family_candidates(source, target, direction=SLOT_DIRECTION_HORIZONTAL,
+                              slot_allocator=_two_column_slots)
+
+
+def _overlay_units(source: Design, *, group_mode: str):
+    # Existing foreground overlays travel together; background layers remain separate.
+    from engine.layout_units import element_iou, is_background_like
+    units = list(build_layout_units(source, group_mode=group_mode))
+    groups = [[unit] for unit in units]
+    index = 0
+    while index < len(groups):
+        other = index + 1
+        while other < len(groups):
+            first = [m for u in groups[index] for m in u.members]
+            second = [m for u in groups[other] for m in u.members]
+            if (len(first) + len(second) <= 6
+                    and not any(is_background_like(m, source.canvas) for m in first + second)
+                    and any(element_iou(a, b) > .02 or contains_any(a, b) for a in first for b in second)):
+                groups[index].extend(groups.pop(other))
+                other = index + 1
+            else:
+                other += 1
+        index += 1
+    merged = []
+    for group in groups:
+        positions = sorted(i for unit in group for i in unit.source_indices)
+        merged.append(LayoutUnit.of(tuple(source.elements[i] for i in positions), tuple(positions), source.canvas))
+    return tuple(merged)
+
+
+def controlled_overlay_candidates(source: Design, target: Canvas) -> list[dict[str, Any]]:
+    return _family_candidates(source, target, direction=SLOT_DIRECTION_HORIZONTAL,
+                              unit_builder=_overlay_units)

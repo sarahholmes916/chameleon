@@ -162,6 +162,59 @@ built on them as validated until the steps below are done and recorded.
 4. **Evaluate and tune.** Measure pairwise agreement of the scorer with human preferences, per concern (size, group, spacing, overlap) and overall. Run per-term ablations (set one weight to 0), including `E_pair` against `E_group` to detect double counting. Tune weights only on training sources, select on validation sources, and report once on untouched test sources (Appendix E.3, split by source design). Keep the weights summing to 1.0.
 5. **Record.** Version the objective (`objective_version`) and store the weights, constants, calibration-set identity, renderer revision and the agreement numbers together; any later change bumps the version. Until step 4 is complete the weights are labelled provisional wherever they appear.
 
+### D.1.7 Shape stretching (S04 generator v0.3, `shape_stretch_v1`)
+
+Layout units place every member with one uniform scale, so on extreme targets buttons, badges and bars
+shrink to slivers. `engine/shape_stretch.py` is a post-placement pass over an already placed candidate:
+eligible **shapes** may scale independently on each axis (`scale_x = new_w/old_w`, `scale_y = new_h/old_h`).
+Only K6 fields change (`x`, `y`, `width`, `height`, and a button label's `font_size`), every edit goes through
+`layout_edit`, and `validate_candidate` stays the authority. The base candidate is never replaced; the
+proportional layout remains in the pool as the alternative.
+
+**Roles** (`engine/shape_roles.py`, source geometry and `shape_type` only; IDs, `_note` text and underscore
+fields are never read; ambiguity means FIXED):
+
+| Role | Evidence | Treatment |
+| --- | --- | --- |
+| BACKGROUND | background-like rectangle (D.1.3) | fills its per-axis canvas-fraction region |
+| PANEL | rectangle holding other elements, or >=15% of the canvas and not thin | fills its region while still holding its content (source padding scaled with the content) |
+| BUTTON | rectangle <=25% of the canvas holding exactly one text label at least 25% of its height | resized around the label |
+| BAR_H / BAR_V | rectangle aspect >=4 or <=1/4 (or a line), not holding anything | lengthens along its long axis only; thickness untouched |
+| PROPORTION_SENSITIVE | any ellipse (circles included); empty near-square rectangles (aspect 0.8-1.25) | never stretched |
+| FIXED | rotated, ambiguous, or other | never stretched |
+
+**Button (label_fit).** Single-line labels only. Padding is measured from the source in ems of the label font
+(clipped to 0.4-2.5 em horizontal, 0.15-1.2 em vertical); the new shape is natural label width plus that padding,
+the label is centered in it, and the label font is tried from the largest allowed rung down to the base font
+(growth at most x1.5, never above a text that was larger in the source, never above the source size). Widening is
+tried before padding shrink, before shifting the button left or right. A pill (corner radius >= half the source
+height) never grows taller than twice its radius, and the aspect ratio may change at most x3 from the source.
+
+**Bars (axis_x / axis_y).** A bar follows the element it runs parallel to (overlap >=60% of the longer extent, within
+15% of the canvas across); otherwise a bar spanning >=50% of the source canvas along its length maps to canvas
+fractions; any other bar is left alone. It grows along a ladder (100/75/50/25% of the way) until it is not blocked.
+
+**Rejection, not repair.** A move is rejected if the box leaves the canvas (stroke included), newly overlaps an
+unrelated element that the old box did not touch (panels are blocked only by elements stacking beneath them), or
+would shrink a bar. Stretches under half a pixel are not stretches.
+
+**Variants** (each emitted only if it differs from the base and from earlier variants): `label_fit`, `panel_fill`,
+`axis_x`, `axis_y`, and `balanced` (everything above, panels and bars log-interpolated at half strength; backgrounds
+always fill). The pool derives them from the best `max_stretch_bases` (3) distinct valid bases, interleaved, up to
+`max_stretch_candidates` (12), inside `max_raw_candidates`: a quarter of the raw budget (capped by the stretch cap)
+is reserved for them. Each variant is validated, text-fitted and scored like any other candidate. Provenance
+(`variant`, `base_candidate_id`, `shape_stretch_version`) lives on `PoolCandidate`, never in the Adobe JSON.
+Retention treats a candidate as distinct from another if its mean layout distance exceeds the threshold **or** its
+largest single-shape displacement exceeds 0.1, so a variant that only reshapes a few shapes is not discarded as a
+near-duplicate of its base. Production selection is the global valid score winner, as before.
+
+**Objective v4 (`objective_v4_shape`)**: no new term and no weight change. `E_scale` adds an aspect-distortion
+penalty for ellipses (2:1 distortion scores 1; stretched buttons, panels and bars are not penalized for aspect).
+`E_group` containment losses add label padding asymmetry beyond the source's (gain 4). `E_cover`, `E_balance` and the
+`E_space` block boxes ignore **backdrop panels** (panel holding content at least 1.5x its area): without this a
+panel-fill variant won on coverage and spacing alone by overlapping its neighbors, which was observed before the
+change. All new constants are provisional and uncalibrated (D.1.6).
+
 ## D.2 Candidate option diversification
 
 Among candidates passing all checked hard constraints:
@@ -179,3 +232,53 @@ Here centers are target-normalized, areas are target-area-normalized, and `epsil
 5. The contest-facing `resize()` returns exactly the first chosen design in Adobe JSON; a separate `resize_with_options()` (provisional name, spec U4) may expose a private list for the demo or annotation app.
 
 ---
+
+
+## D.3 Implemented S04 v0.2 revisions (2026-10-30)
+
+These revisions supersede the older proposed defaults above where they differ.
+
+- **Ungrouped clustering:** explicit grouping semantics and existing association weights are unchanged.
+  Ungrouped text pairs use a separate 0.30 threshold with alignment <=0.02, normalized center distance
+  <=0.06, no source overlap/containment, and vertical gap <=1.2 times the smaller font size.
+  Inferred components remain capped at six. Shapes, images and overlay pairs are not rigidly clustered
+  without group evidence by this path. These are internal heuristics, not Adobe rules.
+- **Spacing:** banner zones bound total gap expenditure to 20% per axis, wrapping dense sets using
+  aspect-aware columns. Packed containers reduce nominal gaps to at most 20% of available height;
+  optical edge floors yield when they leave no room. No-area containers reject proposals. Positive
+  source boxes cannot silently collapse and pass the existing validator.
+- **New families:** TWO_COLUMN alternates units across two columns with adaptive row gaps.
+  CONTROLLED_OVERLAY merges source-overlapping/contained foreground units (up to six members)
+  before flow placement; it preserves their relative geometry. Backgrounds remain separate.
+  Neither family changes Adobe group IDs or invents semantic roles.
+- **Typography:** `layout_typography.py` fits whole words and explicit line breaks, accounts approximately
+  for weight/letter spacing, preserves content and protected fields, respects max_lines, and shrinks
+  only font_size down to schema minimum 1. It preserves candidate font order while fitting.
+  Width constants are provisional, not calibrated glyph metrics. The shared graph_v4 estimator is
+  untouched. An optional renderer measurement callback refines before validation/scoring; its version
+  provenance is distinct. Font fitting is not proof of readable font size. Floor cases can still overflow.
+- **Objective v3:** weights and the other nine terms are unchanged from v2. For eligible newly overlapping
+  pairs, overlap penalty is max(IoU, intersection/text_area for each text member). This catches complete
+  occlusion of small text by large images that IoU hid. Source overlays keep the existing exemptions.
+  The tiny-font/hierarchy terms remain provisional. Coverage still risks rewarding oversized elements;
+  no sample-specific winner forcing or aesthetic improvement claim is made.
+- **Budgets:** PoolConfig defaults to 64 assessed raw proposals and 12 retained valid alternatives.
+  Families are consumed round-robin. The limits are configurable resource choices, not competition
+  limits or minimum success counts. Existing family functions eagerly construct finite lists, so the
+  assessed-proposal cap does not bound all internal family computation. Generation errors do not count
+  as design records; malformed yielded proposals do count. No wall-clock cutoff affects determinism.
+- **Identity/diversity:** remove exact duplicates by canonical full Adobe JSON hash, preserving font
+  differences. Near-duplicate distance is 0.9 times mean(0.55 center + 0.30 size + 0.15 font) plus 0.1
+  mean relative group displacement. Center and group terms divide target-normalized displacement by
+  0.25 and clip at 1; size is the clipped mean absolute log width/height ratio with +1 pixel stabilization;
+  font is clipped absolute log size ratio (zero for non-text). All elements, including images, contribute.
+  Threshold 0.025 is configurable. Center/size changes also capture alignment changes indirectly;
+  this is a geometry proxy, not a perceptual metric. Greedy score-ordered near dedupe keeps the best
+  representative. Retention favors the least represented family, then highest score and stable order.
+  A sole family may fill remaining capacity; no valid alternatives are fabricated.
+- **Production/training:** production picks the global valid score winner, independently of retention.
+  Training consumers see all records/reports and the diverse retained subset. Rendering exports only
+  valid retained JSON, version provenance and PNGs through the existing candidate manifest convention.
+  Scores live in benchmark reports, never human preference labels or the annotation UI.
+
+Renderer evaluation and limitations are recorded in [S04_EVALUATION.md](../S04_EVALUATION.md).

@@ -167,7 +167,7 @@ def test_python_310_syntax():
 
 
 def test_generator_version_pinned():
-    assert GENERATOR_VERSION == "s04_generator_v0.1"
+    assert GENERATOR_VERSION == "s04_generator_v0.3"
 
 
 def test_allocate_slots_tiles_single_band():
@@ -1137,7 +1137,7 @@ def test_stack_centers_between_marks_or_usable_edges_on_core():
                        - (space_bottom - stack_bottom)) <= 1.0
 
 
-def test_block_pill_gaps_hold_outer_nominal_on_core():
+def test_block_pill_gaps_adapt_without_overlap_on_core():
     source, target = load_sample("chameleon_sample_level2_core.json")
     rows = ("headline", "subhead", "badge_bg", "cta_bg")
     for candidate in hero_left_candidates(source, target):
@@ -1150,7 +1150,7 @@ def test_block_pill_gaps_hold_outer_nominal_on_core():
             nominal = BLOCK_OUTER_GAP_EM * max(row_font(placed, lower_id),
                                                row_font(placed, upper_id))
             laid = upper["y"] - (lower["y"] + lower["height"])
-            assert laid >= nominal - 1e-6
+            assert -1e-6 <= laid <= nominal + 1e-6
 
 
 def test_stack_keeps_edge_floors_on_core():
@@ -1170,7 +1170,7 @@ def test_stack_keeps_edge_floors_on_core():
             edge + BLOCK_INNER_GAP_EM * row_font(placed, last_id))
 
 
-def test_pill_block_gaps_match_nominal_when_slack_on_core():
+def test_pill_block_gaps_stay_within_nominal_on_core():
     source, target = load_sample("chameleon_sample_level2_core.json")
     rows = ("headline", "subhead", "badge_bg", "cta_bg")
     usable_top = target.height * MARGIN_FRACTION
@@ -1218,7 +1218,7 @@ def test_pill_block_gaps_match_nominal_when_slack_on_core():
                 nominal = BLOCK_OUTER_GAP_EM * max(row_font(placed, lower_id),
                                                    row_font(placed, upper_id))
                 laid = upper["y"] - (lower["y"] + lower["height"])
-                assert abs(laid - nominal) <= 1.0
+                assert -1e-6 <= laid <= nominal + 1.0
 
 
 def test_corner_marks_use_equal_insets_on_core():

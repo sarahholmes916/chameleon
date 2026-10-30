@@ -8,14 +8,6 @@ from pathlib import Path
 import pytest
 
 import engine.resize as resize_module
-from engine.candidate_generator import (
-    banner_zones_candidates,
-    baseline_candidate,
-    hero_left_candidates,
-    hero_right_candidates,
-    horizontal_flow_candidates,
-    vertical_stack_candidates,
-)
 from engine.candidate_validator import validate_candidate
 from engine.internal_schema import Canvas, Design
 from engine.layout_search import baseline_proposal, find_valid_layout
@@ -34,7 +26,7 @@ FAMILY_FUNCTIONS = (
     "vertical_stack_candidates",
     "hero_left_candidates",
     "hero_right_candidates",
-    "banner_zones_candidates",
+    "banner_zones_candidates", "two_column_candidates", "controlled_overlay_candidates",
 )
 
 
@@ -76,7 +68,7 @@ def test_no_ml_dependencies_by_ast():
         "logging", "collections.abc", "typing",
         "engine.candidate_generator", "engine.candidate_validator",
         "engine.internal_schema", "engine.layout_objective",
-        "engine.layout_search",
+        "engine.layout_search", "engine.candidate_pool",
     }
 
 
@@ -104,22 +96,15 @@ def test_core_background_fills_canvas():
     assert (background["width"], background["height"]) == (1600.0, 400.0)
 
 
-def test_core_winner_is_not_baseline():
+def test_winner_has_best_valid_score():
+    from engine.candidate_pool import build_candidate_pool
+    from engine.layout_objective import score_deterministic
     task, source, target = load_task("chameleon_sample_level2_core.json")
     output = resize(task["source"], task["target_canvas"])
-    assert output != baseline_candidate(source, target)
-    contenders = (horizontal_flow_candidates(source, target)
-                  + vertical_stack_candidates(source, target)
-                  + hero_left_candidates(source, target)
-                  + hero_right_candidates(source, target)
-                  + banner_zones_candidates(source, target))
-    assert output in contenders
-
-
-def test_core_winner_is_hero_right_variant_two():
-    task, source, target = load_task("chameleon_sample_level2_core.json")
-    output = resize(task["source"], task["target_canvas"])
-    assert output == hero_right_candidates(source, target)[2]
+    pool = build_candidate_pool(source, target)
+    score = score_deterministic(source, [Design.from_adobe(output)], target)[0]
+    assert score == max(r.score for r in pool.candidates if r.score is not None)
+    assert validate_candidate(source, output, target).is_valid
 
 
 def test_zones_skipped_below_aspect_cutoff(monkeypatch):
@@ -170,11 +155,12 @@ def test_fallback_when_generator_raises(monkeypatch, name):
 
 
 @pytest.mark.parametrize("name", SAMPLES)
-def test_fallback_when_one_family_raises(monkeypatch, name):
-    task, _, _ = load_task(name)
+def test_other_families_survive_one_family_failure(monkeypatch, name):
+    task, source, target = load_task(name)
     monkeypatch.setattr(resize_module, "horizontal_flow_candidates", _raise)
+    monkeypatch.setattr(resize_module, "find_valid_layout", lambda *_a, **_k: pytest.fail("fallback discarded valid candidates"))
     output = resize(task["source"], task["target_canvas"])
-    assert output == legacy_output(task["source"], task["target_canvas"])
+    assert validate_candidate(source, output, target).is_valid
 
 
 @pytest.mark.parametrize("name", SAMPLES)

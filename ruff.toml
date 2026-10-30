@@ -7,3 +7,4 @@ select = ["E4", "E7", "E9", "F"]
 # Optional imports must follow importorskip so core-only local installs work.
 "tests/test_graph_features.py" = ["E402"]
 "tests/test_ranker.py" = ["E402"]
+"tests/test_shape_stretch_graph.py" = ["E402"]

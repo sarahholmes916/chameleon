@@ -18,6 +18,10 @@ from engine.candidate_generator import (
     FAMILY_HORIZONTAL_FLOW,
     FAMILY_SCALE_BASELINE,
     FAMILY_VERTICAL_STACK,
+    FAMILY_TWO_COLUMN,
+    FAMILY_CONTROLLED_OVERLAY,
+    two_column_candidates,
+    controlled_overlay_candidates,
     banner_zones_candidates,
     baseline_candidate,
     hero_left_candidates,
@@ -25,9 +29,9 @@ from engine.candidate_generator import (
     horizontal_flow_candidates,
     vertical_stack_candidates,
 )
+from engine.candidate_pool import build_candidate_pool
 from engine.candidate_validator import validate_candidate
 from engine.internal_schema import Canvas, Design
-from engine.layout_objective import score_deterministic
 from engine.layout_search import baseline_proposal, find_valid_layout
 
 _logger = logging.getLogger(__name__)
@@ -52,31 +56,23 @@ def _best_index(scores: Sequence[float], family_ranks: Sequence[int]) -> int:
 
 def _select_batch_candidate(design: Design, target: Canvas) -> dict[str, Any] | None:
     """Best validated batch candidate, or None when the batch yields nothing."""
-    batches = [
-        (FAMILY_SCALE_BASELINE, [baseline_candidate(design, target)]),
-        (FAMILY_HORIZONTAL_FLOW, horizontal_flow_candidates(design, target)),
-        (FAMILY_VERTICAL_STACK, vertical_stack_candidates(design, target)),
-        (FAMILY_HERO_LEFT, hero_left_candidates(design, target)),
-        (FAMILY_HERO_RIGHT, hero_right_candidates(design, target)),
+    families = [
+        (FAMILY_SCALE_BASELINE, lambda s, t: [baseline_candidate(s, t)]),
+        (FAMILY_HORIZONTAL_FLOW, horizontal_flow_candidates),
+        (FAMILY_VERTICAL_STACK, vertical_stack_candidates),
+        (FAMILY_HERO_LEFT, hero_left_candidates),
+        (FAMILY_HERO_RIGHT, hero_right_candidates),
+        (FAMILY_TWO_COLUMN, two_column_candidates),
+        (FAMILY_CONTROLLED_OVERLAY, controlled_overlay_candidates),
     ]
     if target.width / target.height > FAMILY_ASPECT_CUTOFF:
-        batches.append(
-            (FAMILY_BANNER_ZONES, banner_zones_candidates(design, target)))
-    shortlisted: list[tuple[int, int, dict[str, Any]]] = []
-    for family, candidates in batches:
-        for position, candidate in enumerate(candidates):
-            report = validate_candidate(design, candidate, target)
-            if report.is_valid:
-                shortlisted.append((_FAMILY_RANK[family], position, candidate))
-            else:
-                _logger.debug("dropping %s[%d]: %s",
-                              family, position, "; ".join(report.violations))
-    if not shortlisted:
+        families.append((FAMILY_BANNER_ZONES, banner_zones_candidates))
+    pool = build_candidate_pool(design, target, families=families)
+    if pool.winner is None:
         return None
-    designs = [Design.from_adobe(candidate) for _, _, candidate in shortlisted]
-    scores = score_deterministic(design, designs, target)
-    ranks = [rank for rank, _, _ in shortlisted]
-    return shortlisted[_best_index(scores, ranks)][2]
+    selected = pool.winner.to_adobe()
+    return selected if validate_candidate(design, selected, target).is_valid else None
+
 
 
 def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, Any]:

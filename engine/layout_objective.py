@@ -34,6 +34,23 @@ Mechanical readings adopted where D.1.5 under-specifies (all deterministic):
   per-object cap but gives no value.
 - Inputs that would make a logarithm undefined (zero/underflowed ratios)
   score 1.0 for that comparison, never NaN.
+- E_scale also penalizes aspect-ratio distortion of proportion-sensitive
+  shapes (ellipses and circles, engine.shape_roles.is_proportion_sensitive):
+  the element penalty is max(area drift, |ln(aspect ratio change)| over
+  SHAPE_DISTORTION_RANGE). Independently stretched buttons, panels and bars
+  are not penalized for their aspect change; only their area drift counts.
+- Backdrop panels (source rectangles that hold other elements, role PANEL in
+  engine.shape_roles) are layering context, not content: E_cover, E_balance
+  and the E_space block boxes ignore them, so stretching a panel over the
+  canvas can neither buy coverage nor hide gaps by overlapping its neighbors.
+  Their stretch still counts toward E_scale. Without this exclusion a
+  panel-fill variant wins on coverage alone (observed before the change).
+- E_group containment losses also include padding asymmetry: when a label
+  stays inside its holder, an asymmetry of its padding (left/right over holder
+  width, top/bottom over holder height) beyond the source's own asymmetry
+  scores up to PADDING_ASYMMETRY_GAIN-scaled penalty, so off-center or
+  clipped-looking button labels lose to centered ones. No new term or weight
+  is added; objective_v4_shape changes the semantics of E_scale and E_group.
 - E_cover is one minus the union area of candidate boxes for
   source-non-background-like elements over the target area (coordinate
   compression; an empty eligible set covers nothing and scores 1).
@@ -58,22 +75,26 @@ from engine.layout_units import (
     normalized_center_distance,
     same_explicit_group,
 )
+from engine.shape_roles import ShapeRole, classify_shapes, is_proportion_sensitive
 from engine.text_fit import estimate_text_height
 
 __all__ = [
     "ALIGN_DEVIATION_SCALE",
     "ALIGN_SOURCE_TOLERANCE",
+    "BACKDROP_AREA_RATIO",
     "BALANCE_AREA_CAP_FRACTION",
     "CandidateWithDesign",
     "GROUP_COMPACTNESS_RANGE",
     "OBJECTIVE_VERSION",
     "PAIR_DISTANCE_SCALE",
+    "PADDING_ASYMMETRY_GAIN",
     "PAIR_SLACK",
     "PROVISIONAL_WEIGHTS",
     "READ_HIERARCHY_WEIGHT",
     "READ_REFERENCE_FONT_SIZE",
     "READ_SIZE_WEIGHT",
     "SCALE_LOG_RANGE",
+    "SHAPE_DISTORTION_RANGE",
     "SOURCE_OVERLAP_IOU_THRESHOLD",
     "SPACE_GAP_SMOOTHING",
     "WEIGHT_ALIGN",
@@ -97,7 +118,7 @@ _logger = logging.getLogger(__name__)
 
 # Version of the weights, constants, and term definitions below. Bump on any
 # change (D.1.6 step 5). Provisional until calibrated against human labels.
-OBJECTIVE_VERSION = "objective_v2_cover"
+OBJECTIVE_VERSION = "objective_v4_shape"
 
 # Provisional ten-term weights (D.1.5, sum 1.0). The nine v1 weights are each
 # multiplied by 0.9 (relative proportions unchanged, mirroring the D.1.5
@@ -121,6 +142,15 @@ PAIR_SLACK = 0.05
 PAIR_DISTANCE_SCALE = 0.25
 # E_scale: log-range normalization.
 SCALE_LOG_RANGE = 3.0
+# E_scale: a proportion-sensitive shape whose aspect ratio changes by this
+# factor (2:1) scores the full distortion penalty.
+SHAPE_DISTORTION_RANGE = math.log(2.0)
+# E_group: padding asymmetry (fraction of holder size, averaged over axes)
+# beyond the source's own that scores the full penalty is 1 / this gain.
+PADDING_ASYMMETRY_GAIN = 4.0
+# A holder is a backdrop only when its area is at least this multiple of its
+# largest contained element (same-size overlays are content, not backdrops).
+BACKDROP_AREA_RATIO = 1.5
 # Source-overlap boundary (D.1.3): IoU at or below this counts as not
 # overlapping. Used for overlap eligibility, E_align overlay exclusion, and
 # E_space block merging.
@@ -221,6 +251,7 @@ def evaluate_objective(
     """
     active = PROVISIONAL_WEIGHTS if weights is None else weights
     matched = _match_by_id(source, candidate)
+    backdrop = _backdrop_ids(source)
     source_width = float(source.source_canvas.width)
     source_height = float(source.source_canvas.height)
     target_width = float(target.width)
@@ -235,14 +266,14 @@ def evaluate_objective(
                        target_width, target_height),
         unwanted_overlap=_e_unwanted_overlap(matched, source.source_canvas),
         balance=_e_balance(matched, source.source_canvas,
-                           target_width, target_height),
+                           target_width, target_height, backdrop),
         read=_e_read(matched),
         group=_e_group(matched, source.source_canvas,
                        source_width, source_height,
                        target_width, target_height),
-        space=_e_space(matched, source.source_canvas, target),
+        space=_e_space(matched, source.source_canvas, target, backdrop),
         cover=_e_cover(matched, source.source_canvas,
-                       target_width, target_height),
+                       target_width, target_height, backdrop),
     )
     total = (
         active.move * terms.move + active.align * terms.align
@@ -280,6 +311,21 @@ def score_deterministic(
         total = evaluate_objective(source, design, target, weights=weights).total
         scores.append(1.0 - total)
     return scores
+
+
+def _backdrop_ids(source: Design) -> frozenset[str]:
+    """Panels that visibly hold smaller content (not same-size overlays)."""
+    found = set()
+    for ident, info in classify_shapes(source).items():
+        if info.role is not ShapeRole.PANEL or not info.contained_ids:
+            continue
+        holder = source.elements_by_id[ident]
+        largest = max(float(source.elements_by_id[inner].width)
+                      * float(source.elements_by_id[inner].height)
+                      for inner in info.contained_ids)
+        if float(holder.width) * float(holder.height) >= BACKDROP_AREA_RATIO * largest:
+            found.add(ident)
+    return frozenset(found)
 
 
 def _match_by_id(
@@ -441,8 +487,14 @@ def _e_scale(matched: list[tuple[Element, Element]], source_canvas: Canvas,
         drift = actual - expected
         if drift != drift or math.isinf(drift):
             penalties.append(1.0)
-        else:
-            penalties.append(min(1.0, abs(drift) / SCALE_LOG_RANGE))
+            continue
+        penalty = min(1.0, abs(drift) / SCALE_LOG_RANGE)
+        if (is_proportion_sensitive(original) and proposed.width > 0
+                and proposed.height > 0):
+            change = math.log((float(proposed.width) / float(proposed.height))
+                              / (float(original.width) / float(original.height)))
+            penalty = max(penalty, min(1.0, abs(change) / SHAPE_DISTORTION_RANGE))
+        penalties.append(penalty)
     return _mean(penalties)
 
 
@@ -471,20 +523,29 @@ def _e_unwanted_overlap(matched: list[tuple[Element, Element]],
             if not _overlap_eligible(original_a, original_b, source_canvas):
                 continue
             eligible.append(f"{original_a.id}&{original_b.id}")
-            penalties.append(min(1.0, element_iou(proposed_a, proposed_b)))
+            penalty = element_iou(proposed_a, proposed_b)
+            # IoU hides occlusion of a small text box by a large image. Measure
+            # the fraction of text obscured as well, without penalizing source overlays.
+            intersection = _intersection_area(_stored_box(proposed_a), _stored_box(proposed_b))
+            for proposed in (proposed_a, proposed_b):
+                area = float(proposed.width) * float(proposed.height)
+                if proposed.type == "text" and area > 0:
+                    penalty = max(penalty, intersection / area)
+            penalties.append(min(1.0, penalty))
     _logger.debug("overlap-eligible pairs: %s",
                   ",".join(eligible) if eligible else "none")
     return _mean(penalties)
 
 
 def _e_balance(matched: list[tuple[Element, Element]], source_canvas: Canvas,
-               target_width: float, target_height: float) -> float:
+               target_width: float, target_height: float,
+               backdrop: frozenset[str] = frozenset()) -> float:
     cap = BALANCE_AREA_CAP_FRACTION * target_width * target_height
     total_weight = 0.0
     weighted_x = 0.0
     weighted_y = 0.0
     for original, proposed in matched:
-        if is_background_like(original, source_canvas):
+        if is_background_like(original, source_canvas) or original.id in backdrop:
             continue
         weight = min(float(proposed.width) * float(proposed.height), cap)
         center_x, center_y = _center(proposed)
@@ -554,6 +615,16 @@ def _group_offset(center_x: float, center_y: float,
     return (across, down)
 
 
+def _padding_asymmetry(inner: tuple[float, float, float, float],
+                       outer: tuple[float, float, float, float]) -> float:
+    """Mean left/right and top/bottom padding imbalance in holder units."""
+    if outer[2] <= 0 or outer[3] <= 0:
+        return 0.0
+    across = abs((inner[0] - outer[0]) - (outer[0] + outer[2] - inner[0] - inner[2]))
+    down = abs((inner[1] - outer[1]) - (outer[1] + outer[3] - inner[1] - inner[3]))
+    return (across / outer[2] + down / outer[3]) / 2
+
+
 def _group_components(members: list[tuple[Element, Element]],
                       source_canvas: Canvas,
                       source_width: float, source_height: float,
@@ -615,7 +686,13 @@ def _group_components(members: list[tuple[Element, Element]],
             else:
                 kept_fraction = _clip01(_intersection_area(inner_box, outer_box)
                                         / inner_area)
-                losses.append(1.0 - kept_fraction)
+                loss = 1.0 - kept_fraction
+                if loss == 0.0:
+                    before = _padding_asymmetry(_stored_box(kept),
+                                                _stored_box(holder))
+                    after = _padding_asymmetry(inner_box, outer_box)
+                    loss = _clip01((after - before) * PADDING_ASYMMETRY_GAIN)
+                losses.append(loss)
     if losses:
         components.append(_mean(losses))
     return components
@@ -671,7 +748,7 @@ def _space_blocks(matched: list[tuple[Element, Element]],
 
 
 def _e_space(matched: list[tuple[Element, Element]], source_canvas: Canvas,
-             target: Canvas) -> float:
+             target: Canvas, backdrop: frozenset[str] = frozenset()) -> float:
     blocks = _space_blocks(matched, source_canvas)
     if len(blocks) < 3:
         return 0.0
@@ -679,8 +756,10 @@ def _e_space(matched: list[tuple[Element, Element]], source_canvas: Canvas,
     axis_length = float(target.width) if horizontal else float(target.height)
     spans = []
     for block in blocks:
+        content = [position for position in block
+                   if matched[position][0].id not in backdrop] or block
         box = _union_box([_stored_box(matched[position][1])
-                          for position in block])
+                          for position in content])
         start = box[0] if horizontal else box[1]
         size = box[2] if horizontal else box[3]
         spans.append((start + size / 2, start, start + size, min(block)))
@@ -712,7 +791,8 @@ def _union_area(boxes: list[tuple[float, float, float, float]]) -> float:
 
 
 def _e_cover(matched: list[tuple[Element, Element]], source_canvas: Canvas,
-             target_width: float, target_height: float) -> float:
+             target_width: float, target_height: float,
+             backdrop: frozenset[str] = frozenset()) -> float:
     """One minus the covered fraction of the target canvas.
 
     Coverage is the union area of candidate boxes for elements that are not
@@ -726,7 +806,7 @@ def _e_cover(matched: list[tuple[Element, Element]], source_canvas: Canvas,
         return 1.0
     boxes = []
     for original, proposed in matched:
-        if is_background_like(original, source_canvas):
+        if is_background_like(original, source_canvas) or original.id in backdrop:
             continue
         left = min(max(float(proposed.x), 0.0), target_width)
         top = min(max(float(proposed.y), 0.0), target_height)

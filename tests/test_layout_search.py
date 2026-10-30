@@ -184,6 +184,11 @@ def test_resize_boundary_propagates_search_failure(monkeypatch):
     monkeypatch.setattr(resize_module, "baseline_candidate", _raise_proposal)
     monkeypatch.setattr(resize_module, "horizontal_flow_candidates", _raise_proposal)
     monkeypatch.setattr(resize_module, "vertical_stack_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "hero_left_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "hero_right_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "banner_zones_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "two_column_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "controlled_overlay_candidates", _raise_proposal)
     raw = design_json()
     with pytest.raises(NoFeasibleLayout):
         resize(raw, raw["canvas"])
@@ -203,6 +208,11 @@ def test_cli_does_not_write_or_render_a_failed_task(monkeypatch, tmp_path):
     monkeypatch.setattr(resize_module, "baseline_candidate", _raise_proposal)
     monkeypatch.setattr(resize_module, "horizontal_flow_candidates", _raise_proposal)
     monkeypatch.setattr(resize_module, "vertical_stack_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "hero_left_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "hero_right_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "banner_zones_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "two_column_candidates", _raise_proposal)
+    monkeypatch.setattr(resize_module, "controlled_overlay_candidates", _raise_proposal)
     rendered = []
     monkeypatch.setattr(main_module, "render_to_png", lambda *args: rendered.append(args))
     with pytest.raises(NoFeasibleLayout):
