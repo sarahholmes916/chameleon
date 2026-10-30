@@ -76,10 +76,13 @@ the seed is retained as configuration provenance for later stochastic proposals.
 
 Implemented families: SCALE_BASELINE, HORIZONTAL_FLOW, VERTICAL_STACK, HERO_LEFT, HERO_RIGHT,
 BANNER_ZONES, TWO_COLUMN, CONTROLLED_OVERLAY. Generator version is `s04_generator_v0.3`;
-pool versions append `+word_fit` or `+measured_text`, and shape-stretch variants append `+shape_stretch_v1`.
-Objective is `objective_v4_shape`. Shape stretching (`engine/shape_roles.py`, `engine/shape_stretch.py`, D.1.7)
+pool versions append `+word_fit` or `+measured_text`, shape-stretch variants append `+shape_stretch_v1`, and refined candidates append `+layout_refinement_v1`.
+Objective is `objective_v6_relations_blank`. Shape stretching (`engine/shape_roles.py`, `engine/shape_stretch.py`, D.1.7)
 derives `label_fit`, `panel_fill`, `axis_x`, `axis_y` and `balanced` variants from the best valid layouts; the
 proportional layout stays in the pool and the scorer, not a preference for stretching, picks the winner.
+Post-stretch local refinement (`engine/layout_refinement.py`, D.1.8) then improves the best valid layouts that show a
+problem; refined candidates are extra pool records with parent/operator/score provenance, text-fit is `s04_word_fit_v2`,
+and the objective is `objective_v6_relations_blank`.
 See [S04 evaluation](S04_EVALUATION.md) for budgets, limitations, commands and evidence.
 
 ## 1. System architecture and pipeline

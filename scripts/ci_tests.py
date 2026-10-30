@@ -15,7 +15,8 @@ SUITES = {
     "core": ("tests/test_internal_schema.py", "tests/test_ci.py", "tests/test_layout_search.py",
              "tests/test_layout_edits.py", "tests/test_layout_units.py",
              "tests/test_layout_objective.py", "tests/test_candidate_generator.py",
-             "tests/test_resize.py", "tests/test_candidate_pool.py", "tests/test_shape_stretch.py"),
+             "tests/test_resize.py", "tests/test_candidate_pool.py", "tests/test_shape_stretch.py",
+             "tests/test_layout_refinement.py"),
     "ml": ("tests/test_graph_features.py", "tests/test_ranker.py", "tests/test_shape_stretch_graph.py"),
     "sources": ("tests/test_source_designs.py", "tests/test_annotation.py", "tests/test_s04_rendering.py"),
 }

@@ -229,11 +229,12 @@ def test_circle_stays_circular_in_every_variant_and_pool_candidate(source):
         for record in pool.candidates:
             if record.validation.is_valid and record.variant != VARIANT_PROPORTIONAL:
                 dot = by_id(record.to_adobe())["dot"]
-                base_dot = by_id(next(r for r in pool.candidates
-                                      if r.candidate_id == record.base_candidate_id).to_adobe())["dot"]
                 assert dot["width"] == pytest.approx(dot["height"])
-                assert (dot["x"], dot["y"], dot["width"], dot["height"]) == \
-                    (base_dot["x"], base_dot["y"], base_dot["width"], base_dot["height"])
+                if record.parent_candidate_id is None:  # a stretch variant never touches the circle
+                    base_dot = by_id(next(r for r in pool.candidates
+                                          if r.candidate_id == record.base_candidate_id).to_adobe())["dot"]
+                    assert (dot["x"], dot["y"], dot["width"], dot["height"]) == \
+                        (base_dot["x"], base_dot["y"], base_dot["width"], base_dot["height"])
 
 
 def test_stretch_changes_only_k6_fields_and_preserves_identity(source):
@@ -315,8 +316,8 @@ def test_validator_rejects_illegal_shape_edits(source):
 def test_pool_keeps_proportional_alternatives_and_provenance(source):
     target = Canvas(width=728, height=90)
     pool = build_candidate_pool(source, target)
-    stretched = [r for r in pool.candidates if r.variant != VARIANT_PROPORTIONAL]
-    proportional = [r for r in pool.candidates if r.variant == VARIANT_PROPORTIONAL]
+    stretched = [r for r in pool.candidates if r.variant != VARIANT_PROPORTIONAL and r.parent_candidate_id is None]
+    proportional = [r for r in pool.candidates if r.variant == VARIANT_PROPORTIONAL and r.parent_candidate_id is None]
     assert stretched and proportional
     ids = {r.candidate_id for r in pool.candidates}
     for record in stretched:
@@ -338,16 +339,19 @@ def test_pool_is_deterministic_and_respects_budgets(source):
     assert len(first.candidates) <= 16 and len(first.retained) <= 5
     assert any(r.variant != VARIANT_PROPORTIONAL for r in first.candidates)
     capped = build_candidate_pool(source, target, PoolConfig(max_stretch_candidates=2))
-    assert sum(r.variant != VARIANT_PROPORTIONAL for r in capped.candidates) <= 2
+    assert sum(r.variant != VARIANT_PROPORTIONAL and r.parent_candidate_id is None for r in capped.candidates) <= 2
     one_base = build_candidate_pool(source, target, PoolConfig(max_stretch_bases=1))
     assert len({r.base_candidate_id for r in one_base.candidates if r.base_candidate_id}) == 1
     off = build_candidate_pool(source, target, PoolConfig(max_stretch_bases=0))
-    assert all(r.variant == VARIANT_PROPORTIONAL for r in off.candidates)
+    assert all(r.variant == VARIANT_PROPORTIONAL or r.parent_candidate_id for r in off.candidates)
+    plain = build_candidate_pool(source, target, PoolConfig(max_stretch_bases=0, max_refine_bases=0))
+    assert all(r.variant == VARIANT_PROPORTIONAL for r in plain.candidates)
     tiny = build_candidate_pool(source, target, PoolConfig(max_raw_candidates=3))
     assert len(tiny.candidates) <= 3
     default = build_candidate_pool(source, target)
     assert len(default.candidates) <= PoolConfig().max_raw_candidates
-    assert sum(r.variant != VARIANT_PROPORTIONAL for r in default.candidates) <= PoolConfig().max_stretch_candidates
+    assert sum(r.variant != VARIANT_PROPORTIONAL and r.parent_candidate_id is None
+               for r in default.candidates) <= PoolConfig().max_stretch_candidates
     with pytest.raises(ValueError):
         PoolConfig(max_stretch_bases=-1)
 

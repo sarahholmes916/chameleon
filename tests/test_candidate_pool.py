@@ -92,7 +92,7 @@ def test_typography_only_alternatives_are_not_exact_duplicates():
     source, target = design([text(0)]), Canvas(width=1000, height=1000)
     a, b = source.to_adobe(), source.to_adobe()
     b["elements"][0]["font_size"] = 6
-    pool = build_candidate_pool(source, target, families=[("A", lambda *_: [a, b])])
+    pool = build_candidate_pool(source, target, PoolConfig(max_refine_bases=0), families=[("A", lambda *_: [a, b])])
     assert len(pool.retained) == 2
 
 

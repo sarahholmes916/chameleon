@@ -13,7 +13,10 @@ import time
 
 from engine.candidate_pool import PoolConfig, build_candidate_pool, identity
 from engine.internal_schema import Canvas, Design
-from engine.layout_objective import OBJECTIVE_VERSION, PROVISIONAL_WEIGHTS
+from engine.candidate_validator import validate_candidate
+from engine.layout_objective import OBJECTIVE_VERSION, PROVISIONAL_WEIGHTS, evaluate_objective
+from engine.layout_refinement import REFINEMENT_VERSION
+from engine.layout_typography import estimated_fit
 from engine.shape_roles import ShapeRole, classify_shapes
 from engine.shape_stretch import SHAPE_STRETCH_VERSION, VARIANT_PROPORTIONAL
 from scripts.source_dataset import SourceRenderer, verify_png, write_json
@@ -106,32 +109,71 @@ def make_preview(renderer, design, path):
     return path, render_checked(renderer, design, path)
 
 
-def _summarize(pool):
+READABLE_FONT = 8.0  # the refiner's default quality preference; a report threshold, not a rule
+
+
+def quality_metrics(source, target, adobe, renderer=None):
+    """Objective facts about one layout. Distinguishes four things that must not be conflated:
+    structural validity, deterministic objective terms, measured text fit, and (absent here) human quality."""
+    design = Design.from_adobe(adobe)
+    terms = asdict(evaluate_objective(source, design, target).terms)
+    texts = [e for e in adobe["elements"] if e["type"] == "text" and e["content"]]
+    fonts = [e["font_size"] for e in texts]
+    out = dict(
+        structurally_valid=validate_candidate(source, adobe, target).is_valid,
+        ids_preserved=[e["id"] for e in adobe["elements"]] == [e.id for e in source.elements],
+        objective_terms=terms, min_font=min(fonts) if fonts else None,
+        texts_below_readable=sum(f < READABLE_FONT for f in fonts), text_count=len(texts),
+        word_fit_ok=sum(bool(estimated_fit(e)["fits"]) for e in texts))
+    if renderer is not None:
+        out["renderer_fit_ok"] = sum(bool(renderer.text_measurement(e)["fits"]) for e in texts)
+    return out
+
+
+def _summarize(pool, source=None, target=None, renderer=None):
     winner = pool.winner
-    return dict(generated=len(pool.candidates), valid=sum(r.validation.is_valid for r in pool.candidates),
-                winner=winner.candidate_id if winner else None, winner_family=winner.family if winner else None,
-                winner_variant=winner.variant if winner else None, winner_score=winner.score if winner else None)
+    row = dict(generated=len(pool.candidates), valid=sum(r.validation.is_valid for r in pool.candidates),
+               winner=winner.candidate_id if winner else None, winner_family=winner.family if winner else None,
+               winner_variant=winner.variant if winner else None, winner_score=winner.score if winner else None,
+               winner_refined=bool(winner and winner.parent_candidate_id),
+               winner_operators=list(winner.refinement_operators) if winner else [])
+    if winner is not None and source is not None:
+        row["quality"] = quality_metrics(source, target, winner.to_adobe(), renderer)
+    return row
 
 
-def _comparison_gallery(output, renderer, source_preview, before_pool, pool, report):
-    """Original, proportional-only winner, best candidate per stretch variant, selected winner."""
+def _comparison_gallery(output, renderer, source_preview, before_pool, stretch_pool, pool, report):
+    """Same source and target: original, baseline winner, stretch-only winner, final winner, and the
+    final winner's lineage (its parent, when refined, and the best stretch variant)."""
     items = [("original source", source_preview)]
     plan = []
     if before_pool and before_pool.winner:
-        plan.append(("before: proportional-only winner", before_pool.winner))
+        plan.append(("1 baseline (no stretch, no refinement) winner", before_pool.winner))
+    if stretch_pool and stretch_pool.winner:
+        plan.append(("2 shape stretch winner", stretch_pool.winner))
+    by_id = {r.candidate_id: r for r in pool.candidates}
+    winner = pool.winner
+    if winner is not None and winner.parent_candidate_id in by_id:
+        plan.append(("lineage: parent of the refined winner", by_id[winner.parent_candidate_id]))
     best = {}
     for r in pool.candidates:
-        if r.variant != VARIANT_PROPORTIONAL and r.validation.is_valid and r.score is not None:
-            if r.variant not in best or r.score > best[r.variant].score:
-                best[r.variant] = r
+        if (r.variant != VARIANT_PROPORTIONAL and r.parent_candidate_id is None and r.validation.is_valid
+                and r.score is not None and (r.variant not in best or r.score > best[r.variant].score)):
+            best[r.variant] = r
     plan += [(f"stretch variant: {name}", rec) for name, rec in sorted(best.items())]
-    if pool.winner:
-        plan.append(("after: selected winner", pool.winner))
+    refined = [r for r in pool.candidates if r.parent_candidate_id and r.validation.is_valid]
+    if refined:
+        top = max(refined, key=lambda r: r.score)
+        if top is not winner:
+            plan.append(("best refined candidate", top))
+    if winner:
+        plan.append(("3 stretch + refinement: selected winner", winner))
     for slot, (label, record) in enumerate(plan):
         path = (output / f"compare_{slot:02}.png").resolve()
         try:
             shown, _ = make_preview(renderer, record.to_adobe(), path)
-            items.append((f"{label}: {record.family} / {record.variant}, score {record.score:.4f}", shown))
+            extra = f", ops {'/'.join(record.refinement_operators)}" if record.refinement_operators else ""
+            items.append((f"{label}: {record.family} / {record.variant}, score {record.score:.4f}{extra}", shown))
         except Exception as exc:
             report["render_failures"].append(f"compare {label}: {type(exc).__name__}: {exc}")
     note = "schematic boxes, NOT the official renderer" if renderer is None else "official renderer previews"
@@ -139,9 +181,9 @@ def _comparison_gallery(output, renderer, source_preview, before_pool, pool, rep
         f'<figure><img width="520" src="{html.escape(Path(path).name)}" alt="">'
         f'<figcaption>{html.escape(caption)}</figcaption></figure>'
         for caption, path in items if path is not None)
-    return (f'<meta charset="utf-8"><h1>Shape-stretch comparison</h1><p>{note}. Scores are the provisional '
-            f'deterministic objective ({OBJECTIVE_VERSION}), not human judgement; a higher score is not proof '
-            f'of a better design.</p><div style="display:flex;flex-wrap:wrap;gap:12px">{figures}</div>')
+    return (f'<meta charset="utf-8"><h1>Baseline / shape stretch / refinement comparison</h1><p>{note}. Scores are the '
+            f'provisional deterministic objective ({OBJECTIVE_VERSION}), not human judgement; a higher score is not '
+            f'proof of a better design.</p><div style="display:flex;flex-wrap:wrap;gap:12px">{figures}</div>')
 
 
 def evaluate_task(task, output, renderer, config, *, family_id="unknown", render_pool=False, measured_fit=False,
@@ -151,12 +193,17 @@ def evaluate_task(task, output, renderer, config, *, family_id="unknown", render
     source = Design.from_adobe(task["source"])
     target = Canvas.from_adobe(task["target_canvas"])
     measure = renderer.text_measurement if (measured_fit and renderer is not None) else None
-    before_pool, before_seconds = None, None
+    before_pool, before_seconds, stretch_pool, stretch_seconds = None, None, None, None
     if compare_baseline:
-        # Same generator and scorer with shape-stretch variants disabled: the proportional-only engine.
+        # Same generator, scorer and budgets: (1) baseline = neither shape stretching nor refinement,
+        # (2) stretch only. The configured pool below is stretch plus refinement.
         start = time.perf_counter()
-        before_pool = build_candidate_pool(source, target, replace(config, max_stretch_bases=0), text_measurement=measure)
+        before_pool = build_candidate_pool(source, target, replace(config, max_stretch_bases=0, max_refine_bases=0),
+                                           text_measurement=measure)
         before_seconds = time.perf_counter() - start
+        start = time.perf_counter()
+        stretch_pool = build_candidate_pool(source, target, replace(config, max_refine_bases=0), text_measurement=measure)
+        stretch_seconds = time.perf_counter() - start
     start = time.perf_counter()
     pool = build_candidate_pool(source, target, config, text_measurement=measure)
     elapsed = time.perf_counter() - start
@@ -177,22 +224,45 @@ def evaluate_task(task, output, renderer, config, *, family_id="unknown", render
     }
     report["variant_counts"] = dict(Counter(r.variant for r in pool.candidates))
     report["variant_invalid"] = dict(Counter(r.variant for r in pool.candidates if not r.validation.is_valid))
-    stretched = [r for r in pool.candidates if r.variant != VARIANT_PROPORTIONAL]
+    stretched = [r for r in pool.candidates if r.variant != VARIANT_PROPORTIONAL and r.parent_candidate_id is None]
+    refined = [r for r in pool.candidates if r.parent_candidate_id]
     best_by_variant = {}
     for r in pool.candidates:
         if r.validation.is_valid and r.score is not None and r.score > best_by_variant.get(r.variant, -math.inf):
             best_by_variant[r.variant] = r.score
-    after_summary = _summarize(pool)
-    before_summary = _summarize(before_pool) if before_pool else None
+    after_summary = _summarize(pool, source, target, renderer)
+    before_summary = _summarize(before_pool, source, target, renderer) if before_pool else None
+    stretch_summary = _summarize(stretch_pool, source, target, renderer) if stretch_pool else None
     report["after"] = dict(after_summary, seconds=elapsed,
                            metrics=shape_metrics(source, pool.winner.to_adobe()) if pool.winner else None)
     report["before"] = (dict(before_summary, seconds=before_seconds,
                              metrics=shape_metrics(source, before_pool.winner.to_adobe()) if before_pool.winner else None)
                         if before_pool else None)
+    report["stretch_only"] = (dict(stretch_summary, seconds=stretch_seconds,
+                                   metrics=shape_metrics(source, stretch_pool.winner.to_adobe()) if stretch_pool.winner else None)
+                              if stretch_pool else None)
+    attempts = list(pool.refinements)
+    report["refinement"] = dict(
+        version=REFINEMENT_VERSION, attempts=len(attempts), refined_candidates=len(refined),
+        refined_valid=sum(r.validation.is_valid for r in refined),
+        proposals_evaluated=sum(a["evaluations"] for a in attempts),
+        rejected_invalid=sum(a["rejected_invalid"] for a in attempts),
+        rejected_invariant=sum(a["rejected_invariant"] for a in attempts),
+        duplicates_skipped=sum(a["duplicates"] for a in attempts), errors=sum(a["errors"] for a in attempts),
+        accepted_rounds=sum(a["accepted"] for a in attempts),
+        mean_objective_improvement=(statistics.fmean(a["score_after"] - a["score_before"] for a in attempts if a["accepted"])
+                                    if any(a["accepted"] for a in attempts) else None),
+        winner_refined=after_summary["winner_refined"], seconds_extra=(elapsed - stretch_seconds) if stretch_seconds is not None else None,
+        attempts_detail=attempts)
     report["shape_stretch"] = dict(
         stretched_generated=len(stretched), stretched_valid=sum(r.validation.is_valid for r in stretched),
         best_score_by_variant=best_by_variant,
         stretched_wins=bool(pool.winner and pool.winner.variant != VARIANT_PROPORTIONAL),
+        stretch_only_winner_score_delta=(stretch_summary["winner_score"] - before_summary["winner_score"]
+                                         if stretch_summary and before_summary
+                                         and None not in (stretch_summary["winner_score"], before_summary["winner_score"]) else None),
+        refinement_winner_score_delta=(after_summary["winner_score"] - stretch_summary["winner_score"]
+                                       if stretch_summary and None not in (after_summary["winner_score"], stretch_summary["winner_score"]) else None),
         winner_score_delta=(after_summary["winner_score"] - before_summary["winner_score"]
                             if before_summary and after_summary["winner_score"] is not None
                             and before_summary["winner_score"] is not None else None),
@@ -214,6 +284,9 @@ def evaluate_task(task, output, renderer, config, *, family_id="unknown", render
                                          validation=asdict(record.validation), score=record.score,
                                          objective_version=record.objective_version, variant=record.variant,
                                          base_candidate_id=record.base_candidate_id,
+                                         parent_candidate_id=record.parent_candidate_id,
+                                         refinement_operators=list(record.refinement_operators),
+                                         score_before_refinement=record.score_before_refinement,
                                          shape_metrics=(shape_metrics(source, record.to_adobe())
                                                         if record.validation.is_valid else None)))
     for i, record in enumerate(selected):
@@ -235,14 +308,17 @@ def evaluate_task(task, output, renderer, config, *, family_id="unknown", render
                                  set_id=output.name, provenance=dict(family=record.family, seed=config.seed,
                                  objective_version=record.objective_version, target_id=record.target_id,
                                  variant=record.variant, base_candidate_id=record.base_candidate_id,
-                                 shape_stretch_version=record.shape_stretch_version))])
+                                 shape_stretch_version=record.shape_stretch_version,
+                                 parent_candidate_id=record.parent_candidate_id,
+                                 refinement_version=record.refinement_version,
+                                 refinement_operators=list(record.refinement_operators)))])
             gallery.append(f'<figure><img width="600" src="{preview.name}"><figcaption>'
                            f'{html.escape(record.family)} / {html.escape(record.variant)}</figcaption></figure>')
         except Exception as exc:
             report["render_failures"].append(f"{record.candidate_id}: {type(exc).__name__}: {exc}")
     report["winner"] = pool.winner.candidate_id if pool.winner else None
     (output / "comparison.html").write_text(
-        _comparison_gallery(output, renderer, source_preview, before_pool, pool, report), encoding="utf-8")
+        _comparison_gallery(output, renderer, source_preview, before_pool, stretch_pool, pool, report), encoding="utf-8")
     report["total_seconds"] = time.perf_counter() - start
     write_json(output / "report.json", report)
     (output / "candidate_manifest.jsonl").write_text("".join(json.dumps(row) + "\n" for row in manifest), encoding="utf-8")
@@ -279,7 +355,46 @@ def aggregate(summaries):
         labels_contained_before=contained(before_metrics), labels_contained_after=contained(after_metrics),
         max_proportion_sensitive_log_aspect_change_after=max(
             (m["max_proportion_sensitive_log_aspect_change"] for m in after_metrics), default=0.0),
-        render_failures=sum(len(r["render_failures"]) for r in summaries))
+        render_failures=sum(len(r["render_failures"]) for r in summaries),
+        **_refinement_aggregate(summaries))
+
+
+def _refinement_aggregate(summaries):
+    rows = [r for r in summaries if r.get("stretch_only") and r.get("refinement")]
+    refinement = [r["refinement"] for r in rows]
+    deltas = [r["shape_stretch"]["refinement_winner_score_delta"] for r in rows
+              if r["shape_stretch"]["refinement_winner_score_delta"] is not None]
+    quality = lambda key: [r[key]["quality"] for r in rows if r[key].get("quality")]  # noqa: E731
+
+    def total(key, group):
+        return sum(q[key] for q in quality(group))
+
+    out = dict(
+        refine_tasks=len(rows),
+        refine_attempts=sum(x["attempts"] for x in refinement), refined_candidates=sum(x["refined_candidates"] for x in refinement),
+        refined_invalid=sum(x["refined_candidates"] - x["refined_valid"] for x in refinement),
+        proposals_evaluated=sum(x["proposals_evaluated"] for x in refinement),
+        proposals_rejected_invalid=sum(x["rejected_invalid"] for x in refinement),
+        proposals_rejected_invariant=sum(x["rejected_invariant"] for x in refinement),
+        proposals_duplicate_skipped=sum(x["duplicates_skipped"] for x in refinement),
+        proposals_errors=sum(x["errors"] for x in refinement),
+        refined_winners=sum(bool(x["winner_refined"]) for x in refinement),
+        mean_refinement_winner_delta=statistics.fmean(deltas) if deltas else None,
+        max_refinement_winner_delta=max(deltas) if deltas else None,
+        refinement_seconds_extra=sum(x["seconds_extra"] or 0.0 for x in refinement),
+        worst_task_seconds_after=max((r["after"]["seconds"] for r in rows), default=0.0),
+        worst_task_seconds_before=max((r["before"]["seconds"] for r in rows), default=0.0))
+    for group in ("before", "stretch_only", "after"):
+        qs = quality(group)
+        out[f"{group}_texts_below_readable"] = sum(q["texts_below_readable"] for q in qs)
+        out[f"{group}_text_count"] = sum(q["text_count"] for q in qs)
+        out[f"{group}_mean_min_font"] = statistics.fmean([q["min_font"] for q in qs if q["min_font"] is not None] or [0.0])
+        out[f"{group}_all_structurally_valid"] = all(q["structurally_valid"] and q["ids_preserved"] for q in qs)
+        out[f"{group}_word_fit_ok"] = total("word_fit_ok", group) if qs else 0
+        out[f"{group}_renderer_fit_ok"] = sum(q.get("renderer_fit_ok", 0) for q in qs)
+        for term in ("read", "unwanted_overlap", "align", "space", "group", "cover", "balance"):
+            out[f"{group}_mean_{term}"] = statistics.fmean([q["objective_terms"][term] for q in qs] or [0.0])
+    return out
 
 
 def main(argv=None):

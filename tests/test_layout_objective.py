@@ -22,6 +22,7 @@ from engine.layout_objective import (
     READ_HIERARCHY_WEIGHT,
     READ_REFERENCE_FONT_SIZE,
     READ_SIZE_WEIGHT,
+    READ_WORST_TEXT_SHARE,
     SCALE_LOG_RANGE,
     SOURCE_OVERLAP_IOU_THRESHOLD,
     SPACE_GAP_SMOOTHING,
@@ -116,7 +117,7 @@ def test_provisional_weights_match_spec():
 
 
 def test_objective_version_matches_cover_rebalance():
-    assert OBJECTIVE_VERSION == "objective_v4_shape"
+    assert OBJECTIVE_VERSION == "objective_v6_relations_blank"
 
 
 def test_weights_must_sum_to_one():
@@ -426,6 +427,18 @@ def test_read_uses_shared_text_fit_estimate():
     assert score.terms.read == pytest.approx(READ_SIZE_WEIGHT * overflow)
 
 
+def test_read_one_unreadable_text_is_not_diluted_by_fine_ones():
+    fine = [text(f"t{i}", 0, 100 * i, 500, 100, content="hi", font_size=12) for i in range(7)]
+    tiny = design(1000, 1000, fine + [text("x", 0, 800, 500, 100, content="hi", font_size=2)])
+    larger = design(1000, 1000, fine + [text("x", 0, 800, 500, 100, content="hi", font_size=4)])
+    target = target_canvas(1000, 1000)
+    worst = 1 - 2 / READ_REFERENCE_FONT_SIZE
+    expected = READ_SIZE_WEIGHT * ((1 - READ_WORST_TEXT_SHARE) * worst / 8 + READ_WORST_TEXT_SHARE * worst)
+    assert evaluate_objective(tiny, tiny, target).terms.read == pytest.approx(expected)
+    assert (evaluate_objective(tiny, tiny, target).terms.read
+            > evaluate_objective(larger, larger, target).terms.read)
+
+
 def test_read_hierarchy_reversal():
     source = design(1000, 1000, [
         text("big", 0, 0, 500, 500, content="hi", font_size=20),
@@ -436,7 +449,8 @@ def test_read_hierarchy_reversal():
         text("small", 0, 500, 500, 500, content="hi", font_size=20),
     ])
     score = evaluate_objective(source, swapped, target_canvas(1000, 1000))
-    mean_size = ((1 - 10 / READ_REFERENCE_FONT_SIZE) + 0.0) / 2
+    worst = 1 - 10 / READ_REFERENCE_FONT_SIZE
+    mean_size = (1 - READ_WORST_TEXT_SHARE) * worst / 2 + READ_WORST_TEXT_SHARE * worst
     expected = READ_SIZE_WEIGHT * mean_size + READ_HIERARCHY_WEIGHT * 1.0
     assert score.terms.read == pytest.approx(expected)
 
@@ -872,3 +886,54 @@ def test_sample_terms_bounded_and_finite(name, attempt):
         assert math.isfinite(value)
     assert 0.0 <= score.total <= 1.0
     assert math.isfinite(score.total)
+
+
+# --- source relations (E_group) and blank space beyond the source's (E_cover), v6 ----------
+def _moved(source, target, edits):
+    raw = source.to_adobe()
+    raw["canvas"] = target.to_adobe()
+    for element in raw["elements"]:
+        element.update(edits.get(element["id"], {}))
+    return Design.from_adobe(raw)
+
+
+def test_layered_pair_kept_together_scores_better_than_pulled_apart():
+    source = design(1000, 1000, [text("a", 100, 100, 200, 50, "Headline"),
+                                 text("b", 150, 120, 200, 50, "Layered caption")])
+    target = target_canvas(1000, 1000)
+    kept = evaluate_objective(source, source, target).terms.group
+    apart = evaluate_objective(source, _moved(source, target, {"b": dict(x=700, y=800)}), target).terms.group
+    assert kept == 0.0 and 0.0 < apart <= 1.0
+
+
+def test_aligned_near_pair_rewards_staying_aligned_and_close():
+    source = design(1000, 1000, [text("a", 100, 100, 100, 30, "01"), text("b", 100, 140, 100, 30, "Caption")])
+    target = target_canvas(1000, 1000)
+    kept = evaluate_objective(source, source, target).terms.group
+    drifted = evaluate_objective(source, _moved(source, target, {"b": dict(x=400)}), target).terms.group
+    assert kept == 0.0 and drifted > kept
+
+
+def test_relation_preference_is_soft_and_ignores_distant_unrelated_pairs():
+    source = design(1000, 1000, [text("a", 100, 100, 100, 30, "01"), text("b", 100, 900, 100, 30, "Far")])
+    target = target_canvas(1000, 1000)
+    moved = _moved(source, target, {"b": dict(x=600)})
+    assert evaluate_objective(source, moved, target).terms.group == 0.0
+    near = design(1000, 1000, [text("a", 100, 100, 100, 30, "01"), text("b", 100, 140, 100, 30, "Caption")])
+    broken = evaluate_objective(near, _moved(near, target, {"b": dict(x=400)}), target)
+    assert 0.0 <= broken.terms.group <= 1.0 and 0.0 <= broken.total <= 1.0
+
+
+def test_cover_penalizes_blank_space_beyond_the_source():
+    source = design(1000, 1000, [shape("p", 100, 100, 400, 400), shape("q", 550, 550, 400, 400)])
+    target = target_canvas(1000, 1000)
+    shrunk = _moved(source, target, {"p": dict(width=100, height=100), "q": dict(width=100, height=100)})
+    raw = 1.0 - 20000.0 / 1_000_000.0
+    assert raw < evaluate_objective(source, shrunk, target).terms.cover <= 1.0
+
+
+def test_cover_has_no_extra_penalty_when_no_emptier_than_the_source():
+    source = design(1000, 1000, [shape("p", 100, 100, 100, 100)])
+    target = target_canvas(1000, 1000)
+    same_blank = _moved(source, target, {"p": dict(x=700, y=700)})
+    assert evaluate_objective(source, same_blank, target).terms.cover == pytest.approx(1.0 - 10000.0 / 1_000_000.0)

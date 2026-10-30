@@ -210,3 +210,122 @@ Examples (see the galleries):
 
 No commit or push was performed.
 
+---
+
+# Post-stretch local refinement (`layout_refinement_v1`, objective v5, word-fit v2)
+
+Verified locally on 2026-10-30, Windows. Design: [D.1.8](reference/D_candidate_generation.md). No human preference
+evaluation was performed. Every score is the provisional deterministic objective, **not** evidence of visual quality.
+
+## What was implemented
+
+| Piece | File |
+| --- | --- |
+| Bounded local search, 12 operators, tiers, invariants | `engine/layout_refinement.py` (new) |
+| Pool integration, separate budgets, provenance, refinement log | `engine/candidate_pool.py` |
+| Objective v5: worst-text readability share; ungrouped containment | `engine/layout_objective.py` |
+| Word-fit v2: 1.4 em line, 3% advance safety, shared `SINGLE_LINE_EM` | `engine/layout_typography.py`, `engine/shape_stretch.py` |
+| Three-way benchmark, quality metrics, lineage galleries | `scripts/evaluate_s04.py` |
+| Tests | `tests/test_layout_refinement.py` (new, core), `tests/test_s04_rendering.py` (renderer), updated `test_layout_objective.py`, `test_candidate_pool.py`, `test_shape_stretch.py` |
+| CI wiring | `scripts/ci_tests.py`, `.github/workflows/ci.yml` |
+
+Unchanged: graph features, ranker, checkpoints, labels, schema, validator, renderer, `resize.py`.
+
+## Is E_read adequate? (it was not, enough)
+
+E_read already penalized small text (linear against a 12px reference) but averaged it, so one unreadable text among many
+was diluted ~8x, and its gradient at tiny sizes was shallow (1.9 to 2.3px moved the score ~0.006). The size part is now
+0.7 x mean + 0.3 x worst. Across the benchmark the mean E_read of winners went 0.397 (baseline) to 0.389 (stretch) to
+0.355 (refined). The 12px reference and the 8px refiner preference are uncalibrated quality preferences.
+
+## Text fitting against actual rendered text
+
+The production path (word-fit, no renderer) was compared with the real renderer on every sample text at five sizes: the
+estimate was 1.6% under at worst on width and never under on height, 1.08x / 1.02x over on average (v2). v1 used 1.3 em per
+line against a measured 1.36 to 1.41 em; word-fit winners that failed the renderer check went from 9 to 4 across the
+sample cases, all four at the 1px floor. With renderer measurement injected (`--measured-fit`) every non-floor winner text
+fit. In the final benchmark, renderer-measured fit is 395/398 (baseline), 394/398 (stretch), 393/398 (refined) texts, and
+every miss is at the 1px floor, where the renderer cannot fit text in a 2 to 3px box.
+
+## Benchmark (real renderer, measured fit)
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.evaluate_s04 --output data/evaluation/s04_refinement_v1 `
+  --sources data/sources/pilot20_v3/sources --source-limit 20 --targets 728x90,1600x400,90x728 `
+  --measured-fit --render-pool --retain 6
+```
+
+63 tasks: the three Adobe samples at their own sizes plus 20 generated designs (editorial, split product, pedestal, image
+panel, poster, schedule, cards, coupon, bands, columns) at 728x90, 1600x400 and 90x728. Artifacts (Git-ignored):
+`data/evaluation/s04_refinement_v1/index.html`; each task has `comparison.html` (original, baseline winner, stretch winner,
+the refined winner's parent, best stretch variants, best refined candidate, final winner), `report.json`, PNGs.
+"Baseline" = no stretching and no refinement; "stretch" = shape stretching only; "refined" = both. Same generator, scorer and budgets.
+
+| Measure | Baseline | Stretch | Stretch + refinement |
+| --- | ---: | ---: | ---: |
+| Candidates generated / valid (final pool) | | | 1208 / 1208 |
+| Winner structurally valid, IDs preserved | all | all | all |
+| Winner score, mean over 63 tasks | 0.7389 | 0.7433 | 0.7672 |
+| Texts below 8px / 398 | 252 | 252 | 220 |
+| Mean smallest winner font (px) | 5.69 | 6.03 | 6.16 |
+| Mean E_read | 0.397 | 0.389 | 0.355 |
+| Mean E_align (worse is higher) | 0.231 | 0.258 | **0.308** |
+| Mean E_space | 0.276 | 0.313 | 0.143 |
+| Mean E_unwanted_overlap | 0.000 | 0.0014 | 0.0025 |
+| Mean E_cover (lower covers more) | 0.839 | 0.822 | 0.755 |
+| Mean E_group | 0.104 | 0.092 | 0.081 |
+| Renderer text-fit ok / 398 | 395 | 394 | 393 |
+| Renderer failures | 0 | 0 | 0 |
+
+Refinement itself (125 attempts on the 63 tasks, 2 bases per task):
+proposals evaluated **13,655**; rejected by validation 21; rejected by invariants (containment, overlap) 3,694;
+duplicate states skipped 3,745; scoring errors 0; refined candidates added 123 (all valid); accepted improvements per attempt
+0 to 8 (mean 4.7); the refined layout won **59 of 63** tasks; mean winner improvement over the stretch winner **+0.0239**
+(max +0.089); no winner changed in 4 tasks. Operators in winners: `grow_text` 202, `snap` 36, `separate` 34,
+`scale_image` 11, `fit_container` 2, `equalize_gaps` 1. Runtime for all 63 tasks: 17 s baseline, 120 s with stretch and
+refinement; slowest task 3.75 s (was 0.65 s). Latency is not a scoring concern (RULES.md), but the pool is ~7x slower.
+
+Where it helps most, by mean refinement gain: 728x90 targets (+0.041) over 1600x400 (+0.018) and 90x728 (+0.013);
+templates centered_editorial (+0.045), split_product (+0.041), editorial_columns (+0.036) over product_pedestal (+0.006),
+offer_coupon (+0.010), information_cards (+0.010); winner families HERO_RIGHT, CONTROLLED_OVERLAY and HERO_LEFT (~+0.04)
+over VERTICAL_STACK and SCALE_BASELINE (~+0.012).
+
+## Where the objective improves but the rendering may not
+
+- **Adobe advanced, 728x90** (baseline 0.6455, stretch 0.6524, refined 0.6986): the refined winner comes from a different parent
+  (BANNER_ZONES) with `grow_text` x5. Its text is much larger and the layout is visibly more legible than the 2 to 5px text of
+  the baseline, but in the rendering the subtitle runs along the bottom edge, the CTA touches the ribbon and the arrangement
+  looks more crowded. The objective rewards readability and coverage more than the crowding it costs.
+- **Alignment gets worse in 39 of 63 tasks** relative to the stretch-only winner (E_align 0.258 to 0.308): growing text and
+  pushing neighbors breaks source alignments faster than `snap` repairs them, and E_align's weight (0.0675) is small next to E_read (0.225).
+  This is a limit of the objective, not something the optimizer was forced around.
+- **Adobe core, 1600x400**: the visible improvement is from shape stretching; refinement only rescaled the product image
+  (+0.001), a change a human may not notice or prefer.
+- E_cover/E_space gains partly reflect larger text filling the canvas; "more coverage" is not a goal in itself.
+
+## Compliance and validation
+
+Every refined candidate in the benchmark (123) passed `validate_candidate` and kept all IDs in original order. Protected
+fields cannot change: edits go through `layout_edit`, the validator re-checks every proposal before and after text fitting,
+and `build_candidate_pool` re-validates and re-scores the final JSON before it can be a record (a tampered refinement result
+is dropped, tested). `resize()` is unchanged and still revalidates the pool winner.
+
+## Verification
+
+- Full suite in the repository `.venv`, core guard in `.venv/ci-core` (no torch), ML guard in `.venv/ci-ml`, and Ruff over all
+  three CI lint path sets are reported in the final summary of this change; GitHub Actions has not been run (nothing pushed),
+  and Python 3.10 specifically was not exercised (local venvs are 3.11).
+- The core suite grew from ~660 to 730 tests and now takes ~110 s (limit 600 s per job).
+
+## Limitations and next work
+
+- Scores are uncalibrated; every new constant (readable 8px, gap 3%, step schedule, growth ladder, font-shrink onset 20% and weight 0.2, worst-text
+  share 0.3, implicit containment) needs human judgements before trust. Compare baseline/stretch/refined pairs from
+  `comparison.html` in the annotation tournament.
+- 220 of 398 winner texts are still below 8px: extreme banners simply do not have room. Refinement cannot create room by
+  removing or hiding elements, which is correctly forbidden.
+- Operators not implemented: restricted swaps/region shifts, whole-block text moves beyond neighbor pushing, two-label
+  button refit. Greedy best-improvement search can stall in local optima, and it is budget-limited here: of 125 refinement attempts 85 stopped at the evaluation cap (120), 14 at the round cap (8) and only 26 converged, so larger budgets would probably score higher at proportionally more runtime (untested).
+- Refinement is applied to at most 2 bases per pool, so a weak base that would refine very well can be missed.
+
+No commit or push was performed.

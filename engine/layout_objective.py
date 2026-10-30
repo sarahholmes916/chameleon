@@ -34,6 +34,13 @@ Mechanical readings adopted where D.1.5 under-specifies (all deterministic):
   per-object cap but gives no value.
 - Inputs that would make a logarithm undefined (zero/underflowed ratios)
   score 1.0 for that comparison, never NaN.
+- E_group / E_cover (objective_v6_relations_blank): E_group also rewards source
+  relations (layered or aligned-and-near pairs) staying together; E_cover also
+  penalizes blank space beyond the source's own. Both are soft preferences.
+- E_read (objective_v5_readability): the size part is 0.7 * mean + 0.3 * worst
+  text (READ_WORST_TEXT_SHARE), so a single unreadably small text is no longer
+  diluted by fine ones. The 12px reference stays a provisional quality
+  preference, not an Adobe validity rule.
 - E_scale also penalizes aspect-ratio distortion of proportion-sensitive
   shapes (ellipses and circles, engine.shape_roles.is_proportion_sensitive):
   the element penalty is max(area drift, |ln(aspect ratio change)| over
@@ -45,6 +52,10 @@ Mechanical readings adopted where D.1.5 under-specifies (all deterministic):
   canvas can neither buy coverage nor hide gaps by overlapping its neighbors.
   Their stretch still counts toward E_scale. Without this exclusion a
   panel-fill variant wins on coverage alone (observed before the change).
+- E_group also scores UNGROUPED containment: a shape that held an element in the
+  source (non-background-like holder, different or absent group) should still hold
+  it; the mean loss counts as one more group-like penalty. Without it, repairing a
+  panel that lost its content cannot register as an improvement for the refiner.
 - E_group containment losses also include padding asymmetry: when a label
   stays inside its holder, an asymmetry of its padding (left/right over holder
   width, top/bottom over holder height) beyond the source's own asymmetry
@@ -93,6 +104,7 @@ __all__ = [
     "READ_HIERARCHY_WEIGHT",
     "READ_REFERENCE_FONT_SIZE",
     "READ_SIZE_WEIGHT",
+    "READ_WORST_TEXT_SHARE",
     "SCALE_LOG_RANGE",
     "SHAPE_DISTORTION_RANGE",
     "SOURCE_OVERLAP_IOU_THRESHOLD",
@@ -118,7 +130,7 @@ _logger = logging.getLogger(__name__)
 
 # Version of the weights, constants, and term definitions below. Bump on any
 # change (D.1.6 step 5). Provisional until calibrated against human labels.
-OBJECTIVE_VERSION = "objective_v4_shape"
+OBJECTIVE_VERSION = "objective_v6_relations_blank"
 
 # Provisional ten-term weights (D.1.5, sum 1.0). The nine v1 weights are each
 # multiplied by 0.9 (relative proportions unchanged, mirroring the D.1.5
@@ -159,6 +171,21 @@ SOURCE_OVERLAP_IOU_THRESHOLD = 0.02
 READ_REFERENCE_FONT_SIZE = 12.0
 READ_SIZE_WEIGHT = 0.8
 READ_HIERARCHY_WEIGHT = 0.2
+# E_read: share of the size part taken from the WORST text instead of the mean. A mean
+# lets one unreadable text hide among many fine ones (1 of 8 texts at 1.9px moved the
+# term ~0.1); a quality preference, provisional like every constant here.
+READ_WORST_TEXT_SHARE = 0.3
+# E_group: share of the term given to SOURCE relations (layered or aligned-and-near pairs
+# that are not explicitly grouped) relative to the existing group components (weight 1).
+# A soft preference: keeping such pairs together is rewarded, breaking them is never invalid.
+RELATION_GROUP_SHARE = 1.0
+# A source pair counts as "near" when its canvas-normalized center distance is at most this.
+RELATION_NEAR_DISTANCE = 0.35
+# E_cover: the raw uncovered fraction grows toward 1 by this share of the blank space
+# BEYOND the source's own (area plus empty bands per axis); no extra blank = no change.
+COVER_EXCESS_SHARE = 0.5
+# Floor on the source's covered fraction when normalizing blank-space excess.
+COVER_EXCESS_FLOOR = 0.05
 # E_group compactness log-range normalization.
 GROUP_COMPACTNESS_RANGE = 3.0
 # E_space gap-mean smoothing.
@@ -270,7 +297,7 @@ def evaluate_objective(
         read=_e_read(matched),
         group=_e_group(matched, source.source_canvas,
                        source_width, source_height,
-                       target_width, target_height),
+                       target_width, target_height, target),
         space=_e_space(matched, source.source_canvas, target, backdrop),
         cover=_e_cover(matched, source.source_canvas,
                        target_width, target_height, backdrop),
@@ -601,7 +628,9 @@ def _e_read(matched: list[tuple[Element, Element]]) -> float:
                 flips.append(1.0)
             else:
                 flips.append(0.0)
-    return READ_SIZE_WEIGHT * _mean(per_element) + READ_HIERARCHY_WEIGHT * _mean(flips)
+    size = ((1.0 - READ_WORST_TEXT_SHARE) * _mean(per_element)
+            + READ_WORST_TEXT_SHARE * max(per_element, default=0.0))
+    return READ_SIZE_WEIGHT * size + READ_HIERARCHY_WEIGHT * _mean(flips)
 
 
 def _group_offset(center_x: float, center_y: float,
@@ -698,9 +727,36 @@ def _group_components(members: list[tuple[Element, Element]],
     return components
 
 
+def _implicit_containment_losses(matched: list[tuple[Element, Element]],
+                                 source_canvas: Canvas) -> list[float]:
+    """Containment loss for shapes that hold elements without sharing a group ID.
+
+    A panel or card that held an element in the source should still hold it; explicit
+    groups are scored by _group_components, so same-group pairs are skipped here.
+    Background-like holders are layering context and skipped, as in the group term.
+    """
+    losses = []
+    for holder, moved_holder in matched:
+        if holder.type != "shape" or is_background_like(holder, source_canvas):
+            continue
+        for kept, moved_kept in matched:
+            if (kept is holder or same_explicit_group(holder, kept)
+                    or not box_contains(holder, kept)):
+                continue
+            inner = _stored_box(moved_kept)
+            area = inner[2] * inner[3]
+            if area <= 0:
+                losses.append(0.0)
+                continue
+            losses.append(1.0 - _clip01(
+                _intersection_area(inner, _stored_box(moved_holder)) / area))
+    return losses
+
+
 def _e_group(matched: list[tuple[Element, Element]], source_canvas: Canvas,
              source_width: float, source_height: float,
-             target_width: float, target_height: float) -> float:
+             target_width: float, target_height: float,
+             target: Canvas) -> float:
     grouped: dict[str, list[int]] = {}
     for position, (original, _) in enumerate(matched):
         if isinstance(original.group_id, str):
@@ -714,7 +770,75 @@ def _e_group(matched: list[tuple[Element, Element]], source_canvas: Canvas,
             members, source_canvas, source_width, source_height,
             target_width, target_height,
         )))
-    return _mean(penalties)
+    implicit = _implicit_containment_losses(matched, source_canvas)
+    if implicit:
+        penalties.append(_mean(implicit))
+    relations = _relation_losses(matched, source_canvas, target)
+    if not relations:
+        return _mean(penalties)
+    if not penalties:
+        return _mean(relations)
+    return ((_mean(penalties) + RELATION_GROUP_SHARE * _mean(relations))
+            / (1.0 + RELATION_GROUP_SHARE))
+
+
+def _relation_losses(matched: list[tuple[Element, Element]], source_canvas: Canvas,
+                     target: Canvas) -> list[float]:
+    """Loss for source relations that were broken: layered or aligned-and-near pairs.
+
+    Only pairs the source itself relates count (never inferred from IDs or text): layered
+    pairs (IoU above the overlap threshold, or containment between non-shape elements)
+    keep their overlap; aligned pairs close together in the source keep both their
+    alignment and their closeness. Explicit group members and shape-holds-element pairs
+    are scored elsewhere in this term, backgrounds are context and skipped.
+    """
+    source_sizes = (float(source_canvas.width), float(source_canvas.height))
+    target_sizes = (float(target.width), float(target.height))
+    losses = []
+    for left in range(len(matched)):
+        for right in range(left + 1, len(matched)):
+            original_a, proposed_a = matched[left]
+            original_b, proposed_b = matched[right]
+            if (same_explicit_group(original_a, original_b)
+                    or is_background_like(original_a, source_canvas)
+                    or is_background_like(original_b, source_canvas)
+                    or not _positive_area(original_a) or not _positive_area(original_b)):
+                continue
+            holder = (original_a.type == "shape" and box_contains(original_a, original_b))                 or (original_b.type == "shape" and box_contains(original_b, original_a))
+            if holder:
+                continue
+            if (element_iou(original_a, original_b) > SOURCE_OVERLAP_IOU_THRESHOLD
+                    or contains_any(original_a, original_b)):
+                before = _layer_fraction(_stored_box(original_a), _stored_box(original_b))
+                after = _layer_fraction(_stored_box(proposed_a), _stored_box(proposed_b))
+                losses.append(_clip01((before - after) / before) if before > 0 else 0.0)
+                continue
+            if normalized_center_distance(original_a, original_b,
+                                          source_canvas) > RELATION_NEAR_DISTANCE:
+                continue
+            anchors_a, anchors_b = _anchors(original_a), _anchors(original_b)
+            moved_a, moved_b = _anchors(proposed_a), _anchors(proposed_b)
+            drifts = []
+            for axis in (0, 1):
+                for slot in range(3):
+                    if abs(anchors_a[axis][slot] - anchors_b[axis][slot])                             / source_sizes[axis] <= ALIGN_SOURCE_TOLERANCE:
+                        drifts.append(min(1.0, abs(moved_a[axis][slot] - moved_b[axis][slot])
+                                          / target_sizes[axis] / ALIGN_DEVIATION_SCALE))
+            if not drifts:
+                continue
+            growth = min(1.0, max(0.0, normalized_center_distance(
+                proposed_a, proposed_b, target)
+                - normalized_center_distance(original_a, original_b, source_canvas)
+                - PAIR_SLACK) / PAIR_DISTANCE_SCALE)
+            losses.append((_mean(drifts) + growth) / 2)
+    return losses
+
+
+def _layer_fraction(first: tuple[float, float, float, float],
+                    second: tuple[float, float, float, float]) -> float:
+    """Overlap area as a fraction of the smaller box."""
+    smaller = min(first[2] * first[3], second[2] * second[3])
+    return _intersection_area(first, second) / smaller if smaller > 0 else 0.0
 
 
 def _space_blocks(matched: list[tuple[Element, Element]],
@@ -804,15 +928,53 @@ def _e_cover(matched: list[tuple[Element, Element]], source_canvas: Canvas,
     target_area = target_width * target_height
     if target_area <= 0:
         return 1.0
+    candidate = _clipped_boxes([(o, p) for o, p in matched
+                                if not (is_background_like(o, source_canvas) or o.id in backdrop)],
+                               1, target_width, target_height)
+    raw = _clip01(1.0 - _union_area(candidate) / target_area)
+    # Blank space BEYOND what the source already had (area and empty bands per axis).
+    original = _clipped_boxes([(o, o) for o, _ in matched
+                               if not (is_background_like(o, source_canvas) or o.id in backdrop)],
+                              0, float(source_canvas.width), float(source_canvas.height))
+    before = _coverage(original, float(source_canvas.width), float(source_canvas.height))
+    after = _coverage(candidate, target_width, target_height)
+    excess = _mean([_clip01((before[k] - after[k]) / max(before[k], COVER_EXCESS_FLOOR))
+                    for k in range(3)])
+    # Unchanged when the candidate is no emptier than the source; stays within [0, 1].
+    return raw + (1.0 - raw) * COVER_EXCESS_SHARE * excess
+
+
+def _clipped_boxes(pairs: list[tuple[Element, Element]], which: int, width: float,
+                   height: float) -> list[tuple[float, float, float, float]]:
     boxes = []
-    for original, proposed in matched:
-        if is_background_like(original, source_canvas) or original.id in backdrop:
-            continue
-        left = min(max(float(proposed.x), 0.0), target_width)
-        top = min(max(float(proposed.y), 0.0), target_height)
-        right = min(max(float(proposed.x) + float(proposed.width), 0.0),
-                    target_width)
-        bottom = min(max(float(proposed.y) + float(proposed.height), 0.0),
-                     target_height)
+    for pair in pairs:
+        element = pair[which]
+        left = min(max(float(element.x), 0.0), width)
+        top = min(max(float(element.y), 0.0), height)
+        right = min(max(float(element.x) + float(element.width), 0.0), width)
+        bottom = min(max(float(element.y) + float(element.height), 0.0), height)
         boxes.append((left, top, right - left, bottom - top))
-    return _clip01(1.0 - _union_area(boxes) / target_area)
+    return boxes
+
+
+def _span_length(spans: list[tuple[float, float]]) -> float:
+    total, end = 0.0, None
+    for start, stop in sorted(spans):
+        if end is None or start > end:
+            total += stop - start
+            end = stop
+        elif stop > end:
+            total += stop - end
+            end = stop
+    return total
+
+
+def _coverage(boxes: list[tuple[float, float, float, float]], width: float,
+              height: float) -> tuple[float, float, float]:
+    """Covered fractions: area, and the share of each axis crossed by some box."""
+    if width <= 0 or height <= 0:
+        return (0.0, 0.0, 0.0)
+    solid = [b for b in boxes if b[2] > 0 and b[3] > 0]
+    return (_union_area(solid) / (width * height),
+            _span_length([(b[0], b[0] + b[2]) for b in solid]) / width,
+            _span_length([(b[1], b[1] + b[3]) for b in solid]) / height)

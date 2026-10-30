@@ -38,7 +38,7 @@ from typing import Any
 
 from engine.internal_schema import ABSENT, Canvas, Design, Element
 from engine.layout_edits import layout_edit
-from engine.layout_typography import estimated_fit
+from engine.layout_typography import SINGLE_LINE_EM, estimated_fit
 from engine.shape_roles import ShapeInfo, ShapeRole, classify_shapes
 
 __all__ = [
@@ -84,7 +84,7 @@ _OVERLAP_EPS = 1e-6
 # part (the word-fit estimate reserves 2px on each axis).
 _LABEL_WIDTH_SLACK = 1.04
 _LABEL_PIXEL_SLACK = 2.01
-_LABEL_LINE_EM = 1.3 * 1.001
+_LABEL_LINE_EM = SINGLE_LINE_EM * 1.001
 # Source padding of a button label, in ems of the label font, clipped to
 # sensible bounds; padding may shrink to the floor before the font does.
 _PAD_X_EM_RANGE = (0.4, 2.5)

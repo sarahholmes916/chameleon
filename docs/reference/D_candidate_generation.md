@@ -208,12 +208,93 @@ Retention treats a candidate as distinct from another if its mean layout distanc
 largest single-shape displacement exceeds 0.1, so a variant that only reshapes a few shapes is not discarded as a
 near-duplicate of its base. Production selection is the global valid score winner, as before.
 
-**Objective v4 (`objective_v4_shape`)**: no new term and no weight change. `E_scale` adds an aspect-distortion
+**Objective v4 (introduced with shape stretching; see D.1.8 for v5)**: no new term and no weight change. `E_scale` adds an aspect-distortion
 penalty for ellipses (2:1 distortion scores 1; stretched buttons, panels and bars are not penalized for aspect).
 `E_group` containment losses add label padding asymmetry beyond the source's (gain 4). `E_cover`, `E_balance` and the
 `E_space` block boxes ignore **backdrop panels** (panel holding content at least 1.5x its area): without this a
 panel-fill variant won on coverage and spacing alone by overlapping its neighbors, which was observed before the
 change. All new constants are provisional and uncalibrated (D.1.6).
+
+### D.1.8 Post-stretch local refinement (`layout_refinement_v1`, objective v5)
+
+`engine/layout_refinement.py` improves an already valid candidate by bounded local search over the existing
+deterministic scorer and `validate_candidate`. It replaces neither, adds nothing to the K6 allowlist, and always
+returns a valid layout (the input when nothing improves).
+
+**Algorithm.** Deterministic best-improvement local search with a coarse-to-fine step schedule
+(`step_fractions` of each target axis, default 8/4/2/1%). Per step, proposals are generated in three priority tiers
+and scored tier by tier; the best proposal beating the current score by more than `min_improvement` (1e-4) is accepted
+and the search restarts from tier 1. A step ends when no tier improves. No randomness; ties break by tier, operator order,
+proposal order; each geometric state is evaluated at most once (which also prevents oscillation).
+Per proposal: apply via `layout_edit` -> `validate_candidate` -> text refit (`fit_candidate_text`, renderer measurement
+if injected) -> revalidate -> invariants -> finite score.
+
+| Tier | Detected problem | Operators |
+| --- | --- | --- |
+| 1 defects | text below `min_readable_font` (default 8px, a quality preference, not an Adobe rule) and smaller than its source size; text that overflows; unrelated units closer than `min_gap_fraction` (3% of the short side) or overlapping; a panel/button not holding its content | `grow_text`, `expand_text`, `separate`, `fit_container` |
+| 2 polish | alignment drift for pairs aligned in the source; uneven gaps along the flow axis; off-center button label; container padding; bar length | `snap`, `equalize_gaps`, `recenter_label`, `fit_container`, `bar_extent` |
+| 3 opportunistic | blank space around a unit; loose text boxes; text that can grow; images that can rescale; content off-center | `fill_space`, `tighten_text`, `grow_text`, `scale_image`, `center_content` |
+
+**Readability first.** `grow_text` tries a font ladder (x1.1, 1.25, 1.5, 2.0; never above the source size or a text that
+was larger in the source) with a larger box sized from measured natural width (single line) or area (multi-line), three
+anchors (keep, center, bottom), a button's background resized with its label, and neighbors pushed away (`_resolve`, up
+to three cascading passes). Font shrink is never a hard rejection: shrink relative to the starting layout is free up to `font_shrink_onset` (20%), then a
+penalty `font_shrink_weight (0.2) * sum(((shrink - onset) / (1 - onset))^2)` is subtracted from the score the search compares
+(reported scores stay unpenalized), so deeper shrinking costs progressively more but remains possible when it wins.
+
+**Protection.** Units (explicit group; button shape and label; source-overlapping or contained foreground elements)
+move rigidly, so group offsets and intentional overlaps survive. Backgrounds and backdrop panels never translate and are
+only resized. Rejected, never repaired: leaving the canvas; breaking a containment that held at the start; enlarging an
+unintentional overlap (intentional = same group, containment, IoU above 0.02, background-like, read from the source);
+failing validation before or after text fitting; non-finite scores. Circles and ellipses are only translated; images keep
+exact aspect when rescaled.
+
+**Budgets** (`PoolConfig`, all separate; each is documented where it is enforced):
+- `max_raw_candidates` (64) is the hard total of records in the pool.
+- Generation uses `max_raw_candidates` minus the two reserves below. Families still build their finite lists eagerly, so
+  this caps assessed proposals, not internal family computation.
+- Shape stretching: `max_stretch_bases` (3) distinct valid bases, at most `max_stretch_candidates` (12) variants, reserving
+  min(that, raw/4) records.
+- Refinement: `max_refine_bases` (2) best valid layouts that show a diagnosable problem (distinct families first),
+  one refined record per base, at most `max_refined_candidates` (4), reserving min(that, raw/8) records. The work cap is
+  `RefinementConfig.max_evaluations` (120 validated-and-scored proposals per base) and `max_rounds` (8 accepted
+  improvements per base); proposal generation itself is cheap geometry, capped at `max_proposals_per_tier` (24) per tier.
+- 0 disables stretching or refinement. Retention (`max_retained_candidates`) never changes the production winner.
+
+**Provenance** on `PoolCandidate`, never in the Adobe JSON: `parent_candidate_id`, `refinement_version`,
+`refinement_operators`, `score_before_refinement`; the stretch `variant` and `base_candidate_id` are inherited from the
+parent; `generator_version` gains `+layout_refinement_v1`; `CandidatePool.refinements` logs every attempt (proposals
+evaluated, rejected invalid/invariant, duplicates, errors, accepted rounds, stop reason, scores). The candidate ID is the
+hash of the exact refined JSON. Scores are diagnostics, not preference labels.
+
+**Objective v5 (`objective_v5_readability`, superseded by v6 below)**, no new term or weight. `E_read` was checked: its linear 12px penalty
+averaged over all texts, so one 1.9px text among eight moved the term by ~0.1 and a 1.9 to 2.3px gain moved the score by
+~0.006. The size part is now 0.7 x mean + 0.3 x worst text (`READ_WORST_TEXT_SHARE`). `E_group` now also scores ungrouped
+containment (a shape that held an element in the source should still hold it), which the refiner needs to value repairing
+a panel. Both constants are provisional, like every weight here.
+
+**Objective v6 (`objective_v6_relations_blank`)**, still no new term or weight (both changes live inside existing terms).
+(a) `E_group` gains a *source-relation* component, weighted equally with the existing group components
+(`RELATION_GROUP_SHARE`): pairs the SOURCE relates but does not explicitly group are rewarded for staying related. A
+layered pair (IoU above the overlap threshold, or containment between non-shape elements) keeps its overlap fraction; a
+pair that is aligned on an edge or center line and near in the source (`RELATION_NEAR_DISTANCE` 0.35) keeps both its
+alignment and its closeness. This is a soft preference, never a validity or refinement requirement, and nothing is
+inferred from IDs or text. (b) `E_cover` adds blank space beyond the source's own: with the source's covered fraction
+measured as area and as the share of each axis crossed by some element, the candidate's shortfall is normalized and
+`E_cover = raw + (1 - raw) * COVER_EXCESS_SHARE (0.5) * mean(shortfall)`, so a layout no emptier than the source is
+unchanged. `fill_space` (tier 3) is the matching refinement operator: it scales a whole movable unit up about its center
+(ratios 1.15, 1.35, 1.6, 2.0, or the largest that fits the canvas), fonts included but never above the source size,
+keeping the unit's internal layering and alignment; `_resolve` pushes neighbors aside. All constants are provisional.
+
+**Text-fit calibration** (`s04_word_fit_v2`): the production word-fit used 1.3 em per line; the real renderer measures
+1.36 to 1.41 em, which caused 1 to 2px height misses (76px needed in a 75px box). It is now 1.4 em with a 3% advance safety
+factor, shared by stretching and refinement through `SINGLE_LINE_EM`. `tests/test_s04_rendering.py` checks the estimate
+against actual rendered text and that pool winners fit under the renderer (except at the 1px schema floor, where no box can
+hold text). The production path stays renderer-free; measurement is an injected development/benchmark option.
+
+**Known limits.** Not implemented: restricted swaps or region shifts; moving a text block as a whole to make room beyond
+pushing its neighbors; two-label button refit; resizing explicit group members relative to each other. The objective
+rewards some trade-offs a designer might refuse (see the evaluation report: alignment worsens while readability improves).
 
 ## D.2 Candidate option diversification
 
