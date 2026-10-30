@@ -1,4 +1,4 @@
-"""Tests for the S04 candidate generator (baseline + flow/stack families)."""
+"""Tests for the S04 candidate generator (baseline, flow/stack, hero)."""
 
 import ast
 import json
@@ -8,6 +8,8 @@ import pytest
 
 from engine.candidate_generator import (
     BAND_GAP_FRACTION,
+    FAMILY_HERO_LEFT,
+    FAMILY_HERO_RIGHT,
     FAMILY_HORIZONTAL_FLOW,
     FAMILY_SCALE_BASELINE,
     FAMILY_VERTICAL_STACK,
@@ -15,15 +17,21 @@ from engine.candidate_generator import (
     FLOW_MAX_SINGLE_BAND_UNITS,
     FONT_GROWTH_CAP,
     GENERATOR_VERSION,
+    HERO_MAX_SINGLE_COLUMN_UNITS,
+    HERO_TWO_COLUMN_ASPECT,
     MARGIN_FRACTION,
+    OVERLAY_OPACITY_THRESHOLD,
     SLOT_DIRECTION_HORIZONTAL,
     SLOT_DIRECTION_VERTICAL,
     SLOT_SAFETY_FACTOR,
+    SMALL_ANCHOR_MAX_FRACTION,
     STACK_MAX_SINGLE_COLUMN_UNITS,
     Slot,
     _is_fill_member,
     allocate_slots,
     baseline_candidate,
+    hero_left_candidates,
+    hero_right_candidates,
     horizontal_flow_candidates,
     vertical_stack_candidates,
 )
@@ -49,6 +57,8 @@ FAMILIES = {
     FAMILY_SCALE_BASELINE: lambda source, target: [baseline_candidate(source, target)],
     FAMILY_HORIZONTAL_FLOW: horizontal_flow_candidates,
     FAMILY_VERTICAL_STACK: vertical_stack_candidates,
+    FAMILY_HERO_LEFT: hero_left_candidates,
+    FAMILY_HERO_RIGHT: hero_right_candidates,
 }
 MUTABLE_GEOMETRY = {"x", "y", "width", "height"}
 
@@ -270,12 +280,13 @@ def test_validity_grid_all_fixtures_families_modes(name, family):
     candidates = FAMILIES[family](source, target)
     if family == FAMILY_SCALE_BASELINE:
         assert len(candidates) == 1
+    elif family in (FAMILY_HERO_LEFT, FAMILY_HERO_RIGHT):
+        assert len(candidates) in (len(modes), 2 * len(modes))
     else:
         assert len(candidates) == len(modes)
-    for mode, candidate in zip(modes if family != FAMILY_SCALE_BASELINE else modes[:1],
-                               candidates):
+    for candidate in candidates:
         report = validate_candidate(source, candidate, target)
-        assert report.is_valid, (name, family, mode, report.violations)
+        assert report.is_valid, (name, family, report.violations)
 
 
 @pytest.mark.parametrize("name", SAMPLES)
@@ -300,7 +311,8 @@ def test_noncover_images_keep_exact_ratio(name, family):
 
 
 @pytest.mark.parametrize("name", SAMPLES)
-@pytest.mark.parametrize("family", [FAMILY_HORIZONTAL_FLOW, FAMILY_VERTICAL_STACK])
+@pytest.mark.parametrize("family", [FAMILY_HORIZONTAL_FLOW, FAMILY_VERTICAL_STACK,
+                                     FAMILY_HERO_LEFT, FAMILY_HERO_RIGHT])
 def test_background_fills_target_exactly(name, family):
     source, target = load_sample(name)
     for candidate in FAMILIES[family](source, target):
@@ -501,6 +513,11 @@ def test_split_group_yields_two_candidates():
     assert stack[0] != stack[1]
     for candidate in flow + stack:
         assert validate_candidate(source, candidate, target).is_valid
+    hero_left = hero_left_candidates(source, target)
+    hero_right = hero_right_candidates(source, target)
+    assert len(hero_left) == 2 and len(hero_right) == 2
+    for candidate in hero_left + hero_right:
+        assert validate_candidate(source, candidate, target).is_valid
 
 
 def test_ungrouped_design_yields_one_candidate():
@@ -516,9 +533,200 @@ def test_generator_is_deterministic():
         horizontal_flow_candidates(source, target)
     assert vertical_stack_candidates(source, target) == \
         vertical_stack_candidates(source, target)
+    assert hero_left_candidates(source, target) == hero_left_candidates(source, target)
+    assert hero_right_candidates(source, target) == hero_right_candidates(source, target)
     assert baseline_candidate(source, target) == baseline_candidate(source, target)
 
 
 def test_baseline_is_first_proportional_repair():
     source, target = load_sample("chameleon_sample_level2_core.json")
     assert baseline_candidate(source, target) == baseline_proposal(source, target, 1)
+
+
+def center_x(box):
+    return box["x"] + box["width"] / 2
+
+
+def center_y(box):
+    return box["y"] + box["height"] / 2
+
+
+def test_hero_picks_largest_image_and_mirrors():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    left = boxes_by_id(hero_left_candidates(source, target)[0])
+    right = boxes_by_id(hero_right_candidates(source, target)[0])
+    assert center_x(left["product"]) < target.width / 2
+    assert center_x(right["product"]) > target.width / 2
+    assert left["product"]["width"] == pytest.approx(right["product"]["width"])
+    assert left["product"]["height"] == pytest.approx(right["product"]["height"])
+    assert center_x(left["product"]) + center_x(right["product"]) == pytest.approx(
+        target.width, abs=1e-6)
+    for placed in (left, right):
+        union_left = min(placed["headline"]["x"], placed["deco_circle_2"]["x"])
+        union_right = max(placed["headline"]["x"] + placed["headline"]["width"],
+                          placed["deco_circle_2"]["x"] + placed["deco_circle_2"]["width"])
+        placed["headline_unit_cx"] = (union_left + union_right) / 2
+    assert left["headline_unit_cx"] + right["headline_unit_cx"] == pytest.approx(
+        target.width, abs=1e-6)
+
+
+def test_hero_falls_back_to_largest_unit_without_images():
+    source = design(1000, 1000, [
+        text("big", 0, 0, 600, 200, content="big", font_size=20),
+        text("small", 0, 300, 200, 50, content="small", font_size=12),
+        shape("chip", 0, 400, 100, 100),
+    ])
+    target = target_canvas(1000, 1000)
+    assert required_group_modes(source) == (GROUP_MODE_COHESIVE,)
+    candidates = hero_left_candidates(source, target)
+    assert len(candidates) == 1
+    placed = boxes_by_id(candidates[0])
+    assert center_x(placed["big"]) < target.width / 2
+    assert center_x(placed["small"]) > target.width / 2
+    assert center_x(placed["chip"]) > target.width / 2
+
+
+def test_hero_small_only_image_anchors_while_text_heroes():
+    source, target = load_sample("chameleon_sample_level1_warmup.json")
+    for family in (hero_left_candidates, hero_right_candidates):
+        candidates = family(source, target)
+        assert len(candidates) == 2
+        placed = boxes_by_id(candidates[0])
+        assert placed["logo"]["x"] < 1.0
+        assert placed["logo"]["y"] < 1.0
+        assert center_x(placed["headline"]) < target.width / 2 \
+            if family is hero_left_candidates \
+            else center_x(placed["headline"]) > target.width / 2
+
+
+def test_hero_corner_variants_top_and_bottom():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    for family in (hero_left_candidates, hero_right_candidates):
+        candidates = family(source, target)
+        assert len(candidates) == 2
+        logos = [boxes_by_id(candidate)["logo"] for candidate in candidates]
+        assert all(logo["x"] < 1.0 for logo in logos)
+        tops = sorted(logo["y"] for logo in logos)
+        assert tops[0] < 1.0
+        assert 299.0 < tops[1] < 300.0
+
+
+def test_hero_small_stays_small_and_keeps_ratio():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    for family in (hero_left_candidates, hero_right_candidates):
+        for candidate in family(source, target):
+            logo = boxes_by_id(candidate)["logo"]
+            assert logo["width"] <= target.width * SMALL_ANCHOR_MAX_FRACTION + 1.0
+            assert logo["height"] <= target.height * SMALL_ANCHOR_MAX_FRACTION + 1.0
+            assert logo["width"] / logo["height"] == pytest.approx(320 / 110, rel=1e-9)
+
+
+def test_overlay_attaches_to_max_iou_unit_with_uniform_offsets():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    placed = boxes_by_id(hero_left_candidates(source, target)[0])
+    deco, badge = placed["deco_circle_1"], placed["badge_bg"]
+    assert deco["y"] <= badge["y"] <= deco["y"] + deco["height"]
+    assert center_x(badge) - center_x(deco) == pytest.approx(0.0, abs=1e-6)
+    assert center_y(badge) - center_y(deco) == pytest.approx(
+        -82 * deco["height"] / 500, abs=1e-6)
+    assert placed["product"]["x"] + placed["product"]["width"] < deco["x"]
+    headline, wash = placed["headline"], placed["deco_circle_2"]
+    assert center_y(headline) - center_y(wash) == pytest.approx(0.0, abs=1e-6)
+    assert center_x(headline) - center_x(wash) == pytest.approx(
+        -310 * wash["width"] / 300, abs=1e-6)
+
+
+def test_overlay_without_target_stays_independent_and_wash_fills():
+    assert 0.2 < OVERLAY_OPACITY_THRESHOLD
+    source = design(1000, 1000, [
+        image("photo", 100, 100, 400, 400),
+        shape("wash", 250, 150, 200, 200, opacity=0.2),
+        shape("loner", 700, 700, 100, 100, opacity=0.2),
+        shape("veil", 0, 0, 1000, 1000, opacity=0.1),
+    ])
+    target = target_canvas(1000, 1000)
+    candidates = hero_left_candidates(source, target)
+    assert len(candidates) == 1
+    placed = boxes_by_id(candidates[0])
+    veil = placed["veil"]
+    assert (veil["x"], veil["y"]) == (0.0, 0.0)
+    assert (veil["width"], veil["height"]) == (1000.0, 1000.0)
+    assert center_x(placed["loner"]) > target.width / 2
+    photo, wash = placed["photo"], placed["wash"]
+    assert center_x(wash) - center_x(photo) == pytest.approx(
+        -(center_y(wash) - center_y(photo)), abs=1e-6)
+    assert center_x(wash) - center_x(photo) > 0
+
+
+def test_pill_survives_split_mode():
+    source = design(1000, 1000, [
+        shape("pill_bg", 0, 0, 100, 100, group_id="p"),
+        text("pill_label", 500, 500, 100, 50, content="x", font_size=16,
+             group_id="p"),
+        text("title", 100, 100, 300, 60, content="title", font_size=20),
+    ])
+    assert required_group_modes(source) == (GROUP_MODE_COHESIVE, GROUP_MODE_SPLIT)
+    target = target_canvas(1000, 1000)
+    candidates = hero_left_candidates(source, target)
+    assert len(candidates) == 2
+    for candidate in candidates:
+        placed = boxes_by_id(candidate)
+        back, label = placed["pill_bg"], placed["pill_label"]
+        assert (center_x(label) - center_x(back)) / 500 == pytest.approx(
+            (center_y(label) - center_y(back)) / 475, rel=1e-9)
+        assert center_x(placed["title"]) > target.width / 2
+
+
+def test_similar_pills_separate_without_passing_neighbors():
+    source = design(1000, 1000, [
+        shape("a_bg", 0, 0, 200, 50, group_id="a"),
+        text("a_label", 0, 5, 200, 40, content="a", font_size=14, group_id="a"),
+        shape("b_bg", 0, 100, 200, 50, group_id="b"),
+        text("b_label", 0, 105, 200, 40, content="b", font_size=14, group_id="b"),
+        text("solo", 0, 200, 300, 60, content="hello", font_size=20),
+        image("hero", 0, 300, 400, 400),
+    ])
+    assert required_group_modes(source) == (GROUP_MODE_COHESIVE,)
+    target = target_canvas(1000, 1000)
+    candidates = hero_left_candidates(source, target)
+    assert len(candidates) == 1
+    placed = boxes_by_id(candidates[0])
+    assert placed["a_bg"]["y"] < placed["solo"]["y"] < placed["b_bg"]["y"]
+    assert center_x(placed["hero"]) < target.width / 2
+
+
+def test_headline_before_subhead_core_both_families():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    for family in (hero_left_candidates, hero_right_candidates):
+        for candidate in family(source, target):
+            placed = boxes_by_id(candidate)
+            assert placed["headline"]["y"] < placed["subhead"]["y"]
+
+
+def test_hero_column_count_follows_aspect():
+    elements = [text(f"t{pos}", 0, pos * 100, 200, 60, content="w", font_size=16)
+                for pos in range(6)]
+    source = design(1000, 1000, elements)
+    assert required_group_modes(source) == (GROUP_MODE_COHESIVE,)
+    wide = target_canvas(1000, 400)
+    assert wide.width / wide.height >= HERO_TWO_COLUMN_ASPECT
+    placed = boxes_by_id(hero_left_candidates(source, wide)[0])
+    assert len({placed[f"t{pos}"]["x"] for pos in range(1, 6)}) == 1
+    narrow = target_canvas(400, 1000)
+    assert narrow.width / narrow.height < HERO_TWO_COLUMN_ASPECT
+    assert 5 > HERO_MAX_SINGLE_COLUMN_UNITS
+    placed = boxes_by_id(hero_left_candidates(source, narrow)[0])
+    left_x = [placed[f"t{pos}"]["x"] for pos in (1, 2, 3)]
+    right_x = [placed[f"t{pos}"]["x"] for pos in (4, 5)]
+    assert left_x[0] == left_x[1] == left_x[2]
+    assert right_x[0] == right_x[1]
+    assert left_x[0] < right_x[0]
+
+
+def test_hero_rows_proportional_to_unit_heights():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    placed = boxes_by_id(hero_left_candidates(source, target)[0])
+    assert placed["deco_circle_1"]["height"] / placed["deco_circle_2"]["height"] == \
+        pytest.approx(500 / 300, rel=1e-6)
+    assert placed["subhead"]["height"] / placed["cta_bg"]["height"] == \
+        pytest.approx(70 / 90, rel=1e-6)
