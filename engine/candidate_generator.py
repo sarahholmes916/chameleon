@@ -1171,16 +1171,19 @@ def _pack_container(rows: list[_PackedRow], rect: Slot,
 def _place_anchored(unit: LayoutUnit, target: Canvas, *,
                     top: bool, left: bool,
                     cap: float = math.inf) -> tuple[dict[str, tuple[float, float, float, float]], float]:
-    """Pin a small unit's box corner to a canvas corner, shrinking to fit.
+    """Pin a small unit's visible corner to a canvas corner, shrinking to fit.
 
     The unit fits inside the anchor fraction of each axis and never upscales
     past 1.0; the analytic shrink about the pinned corner keeps rotated and
-    stroked bounds in-canvas the same way centered slots do. The pin sits one
-    mark inset inside the true corner, equal pixels on both axes.
+    stroked bounds in-canvas the same way centered slots do. The pin lands
+    the visible (rotated/stroke) union corner one mark inset inside the true
+    corner, equal pixels on both axes, shifting inward by the visible
+    overhang past the stored box (clamped into the canvas).
     """
     canvas_w = float(target.width)
     canvas_h = float(target.height)
     box_x, box_y, box_w, box_h = unit.bbox
+    ext_left, ext_top, ext_right, ext_bottom = unit.extents
     origin_x = box_x if left else box_x + box_w
     origin_y = box_y if top else box_y + box_h
     inset = min(canvas_w, canvas_h) * MARK_INSET_FRACTION
@@ -1195,6 +1198,18 @@ def _place_anchored(unit: LayoutUnit, target: Canvas, *,
         scale = MIN_UNIT_SCALE
     else:
         scale = min(fit, 1.0, room, cap) * SLOT_SAFETY_FACTOR
+    over_left = (box_x - ext_left) * scale
+    over_right = (ext_right - (box_x + box_w)) * scale
+    over_top = (box_y - ext_top) * scale
+    over_bottom = (ext_bottom - (box_y + box_h)) * scale
+    if left:
+        corner_x = min(max(corner_x + over_left, 0.0), canvas_w)
+    else:
+        corner_x = min(max(corner_x - over_right, 0.0), canvas_w)
+    if top:
+        corner_y = min(max(corner_y + over_top, 0.0), canvas_h)
+    else:
+        corner_y = min(max(corner_y - over_bottom, 0.0), canvas_h)
     boxes = {}
     for element, (fx, fy, fw, fh) in zip(unit.members, unit.relative_geometry):
         boxes[element.id] = (
@@ -1495,7 +1510,9 @@ def _run_pack_passes(
     after the final layout each rider keeps its scaled center-offset with its
     own size capped to stay in-canvas and clear of text and pill boxes.
     Final fonts are decided in the final boxes then pack jobs relay once with
-    them, so shipped gaps match shipped sizes before riders place.
+    them; pill labels center and fit down, pack jobs relay once more with
+    shipped label sizes so gaps match shipped fonts, labels center again,
+    then riders place on final boxes.
     """
     canvas_w = float(target.width)
     canvas_h = float(target.height)
@@ -1619,6 +1636,20 @@ def _run_pack_passes(
         pack_jobs, fonts, caps, target)
     boxes.update(pack_boxes)
     scales.update(pack_scales)
+    pill_units: dict[int, LayoutUnit] = {}
+    for rows, _ in pack_jobs:
+        for row in rows:
+            if _is_pill_unit(row.unit):
+                pill_units[id(row.unit)] = row.unit
+    for unit, _, _ in fit_jobs:
+        if _is_pill_unit(unit):
+            pill_units[id(unit)] = unit
+    _center_pill_labels(list(pill_units.values()), boxes, fonts)
+    _, pack_boxes, pack_scales = _lay_pack_jobs(
+        pack_jobs, fonts, caps, target)
+    boxes.update(pack_boxes)
+    scales.update(pack_scales)
+    _center_pill_labels(list(pill_units.values()), boxes, fonts)
     for overlay, overlay_target in riders:
         target_x, target_y = _placed_unit_center(overlay_target, boxes)
         scale = scales[overlay_target.members[0].id]
@@ -1632,15 +1663,6 @@ def _run_pack_passes(
         boxes.update(_place_rider(overlay, center_x, center_y, rider_scale))
         for element in overlay.members:
             scales[element.id] = rider_scale
-    pill_units: dict[int, LayoutUnit] = {}
-    for rows, _ in pack_jobs:
-        for row in rows:
-            if _is_pill_unit(row.unit):
-                pill_units[id(row.unit)] = row.unit
-    for unit, _, _ in fit_jobs:
-        if _is_pill_unit(unit):
-            pill_units[id(unit)] = unit
-    _center_pill_labels(list(pill_units.values()), boxes, fonts)
     return boxes, scales, fonts
 
 
