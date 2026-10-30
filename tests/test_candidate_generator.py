@@ -33,6 +33,7 @@ from engine.candidate_generator import (
     SLOT_DIRECTION_VERTICAL,
     SLOT_SAFETY_FACTOR,
     SMALL_ANCHOR_MAX_FRACTION,
+    MARK_INSET_FRACTION,
     STACK_MAX_SINGLE_COLUMN_UNITS,
     TYPE_SCALE_TOLERANCE,
     Slot,
@@ -639,6 +640,7 @@ def test_hero_falls_back_to_largest_unit_without_images():
 def test_hero_small_only_image_anchors_while_text_heroes():
     source, target = load_sample("chameleon_sample_level1_warmup.json")
     assert target.width / target.height < PORTRAIT_ASPECT_CUTOFF
+    inset = MARK_INSET_FRACTION * min(target.width, target.height)
     for family, logo_left in ((hero_left_candidates, False),
                               (hero_right_candidates, True)):
         candidates = family(source, target)
@@ -646,12 +648,16 @@ def test_hero_small_only_image_anchors_while_text_heroes():
         top, bottom, center = (boxes_by_id(candidate)["logo"]
                                for candidate in candidates)
         if logo_left:
-            assert top["x"] < 1.0 and bottom["x"] < 1.0
+            assert top["x"] == pytest.approx(inset)
+            assert bottom["x"] == pytest.approx(inset)
         else:
-            assert top["x"] + top["width"] > target.width - 1.0
-            assert bottom["x"] + bottom["width"] > target.width - 1.0
-        assert top["y"] < 1.0
-        assert bottom["y"] + bottom["height"] > target.height - 1.0
+            assert top["x"] + top["width"] == pytest.approx(
+                target.width - inset)
+            assert bottom["x"] + bottom["width"] == pytest.approx(
+                target.width - inset)
+        assert top["y"] == pytest.approx(inset)
+        assert bottom["y"] + bottom["height"] == pytest.approx(
+            target.height - inset)
         assert center_x(center) == pytest.approx(target.width / 2)
         assert center["y"] < 1.0
         placed = boxes_by_id(candidates[0])
@@ -663,19 +669,24 @@ def test_hero_small_only_image_anchors_while_text_heroes():
 
 def test_hero_corner_variants_top_and_bottom():
     source, target = load_sample("chameleon_sample_level2_core.json")
+    inset = MARK_INSET_FRACTION * min(target.width, target.height)
     for family, logo_left in ((hero_left_candidates, False),
                               (hero_right_candidates, True)):
         candidates = family(source, target)
         assert len(candidates) == 6
         logos = [boxes_by_id(candidate)["logo"] for candidate in candidates]
         if logo_left:
-            assert all(logo["x"] < 1.0 for logo in logos)
+            assert all(logo["x"] == pytest.approx(inset) for logo in logos)
         else:
-            assert all(logo["x"] + logo["width"] > target.width - 1.0
+            assert all(logo["x"] + logo["width"]
+                       == pytest.approx(target.width - inset)
                        for logo in logos)
-        tops = sorted(logo["y"] for logo in logos)
-        assert all(top < 1.0 for top in tops[:3])
-        assert all(299.0 < top < 300.0 for top in tops[3:])
+        ordered = sorted(logos, key=lambda logo: logo["y"])
+        for logo in ordered[:3]:
+            assert logo["y"] == pytest.approx(inset)
+        for logo in ordered[3:]:
+            assert (logo["y"] + logo["height"]
+                    == pytest.approx(target.height - inset))
 
 
 def test_hero_small_stays_small_and_keeps_ratio():
@@ -686,6 +697,17 @@ def test_hero_small_stays_small_and_keeps_ratio():
             assert logo["width"] <= target.width * SMALL_ANCHOR_MAX_FRACTION + 1.0
             assert logo["height"] <= target.height * SMALL_ANCHOR_MAX_FRACTION + 1.0
             assert logo["width"] / logo["height"] == pytest.approx(320 / 110, rel=1e-9)
+
+
+def row_font(placed, row_id):
+    """Largest text size in a row: own font, pill label font, else 0.0."""
+    box = placed[row_id]
+    if box["type"] == "text":
+        return box["font_size"]
+    label_id = {"badge_bg": "badge_label", "cta_bg": "cta_label"}.get(row_id)
+    if label_id is not None:
+        return placed[label_id]["font_size"]
+    return 0.0
 
 
 def boxes_overlap(first, second):
@@ -869,8 +891,12 @@ def test_third_small_overflows_into_column():
     target = target_canvas(1000, 1000)
     placed = boxes_by_id(hero_left_candidates(source, target)[0])
     corners = [placed["s1"], placed["s2"]]
-    assert all(box["y"] < 1.0 for box in corners)
-    assert {box["x"] < 1.0 for box in corners} == {True, False}
+    inset = MARK_INSET_FRACTION * min(target.width, target.height)
+    assert all(box["y"] == pytest.approx(inset) for box in corners)
+    left, right = sorted(corners, key=lambda box: box["x"])
+    assert left["x"] == pytest.approx(inset)
+    assert right["x"] + right["width"] == pytest.approx(
+        target.width - inset)
     third = placed["s3"]
     assert 1.0 < third["x"] and third["x"] + third["width"] < 999.0
 
@@ -971,24 +997,28 @@ def test_hierarchy_ratios_capped_on_core():
                 * (1 + FONT_RATIO_TOLERANCE))
 
 
-def test_button_width_capped_to_headline_proportion_on_core():
+def test_pill_size_capped_to_headline_proportion_on_core():
     source, target = load_sample("chameleon_sample_level2_core.json")
     by_id = source.elements_by_id
     head_src_w = float(by_id["headline"].width)
-    ratios = {}
-    for shape_id, label_id in (("badge_bg", "badge_label"),
-                               ("cta_bg", "cta_label")):
-        pill_src_w = max(float(by_id[shape_id].width),
-                         float(by_id[label_id].width))
-        ratios[shape_id] = pill_src_w / head_src_w
+    head_src_h = float(by_id["headline"].height)
+    pills = (("badge_bg", "badge_label"), ("cta_bg", "cta_label"))
     candidates = (hero_left_candidates(source, target)
                   + banner_zones_candidates(source, target))
     for candidate in candidates:
         placed = boxes_by_id(candidate)
-        head_w = placed["headline"]["width"]
-        for shape_id, ratio in ratios.items():
-            assert placed[shape_id]["width"] <= (
-                ratio * head_w * (1 + TYPE_SCALE_TOLERANCE))
+        head = placed["headline"]
+        for shape_id, label_id in pills:
+            for member_id in (shape_id, label_id):
+                src_w = float(by_id[member_id].width)
+                src_h = float(by_id[member_id].height)
+                box = placed[member_id]
+                assert box["width"] <= (
+                    src_w / head_src_w * head["width"]
+                    * (1 + TYPE_SCALE_TOLERANCE))
+                assert box["height"] <= (
+                    src_h / head_src_h * head["height"]
+                    * (1 + TYPE_SCALE_TOLERANCE))
 
 
 def test_block_rows_keep_inner_gap_on_core():
@@ -1088,8 +1118,66 @@ def test_stack_centers_between_marks_or_usable_edges_on_core():
                         space_top = mark["y"] + mark["height"]
                     elif mark["y"] >= stack_bottom:
                         space_bottom = mark["y"]
+            edge = (target.height * MARGIN_FRACTION
+                    * SAFE_BOTTOM_MARGIN_FACTOR)
+            first_font = max(row_font(placed, row_id) for row_id in rows
+                             if placed[row_id]["y"] == stack_top)
+            last_font = max(row_font(placed, row_id) for row_id in rows
+                            if (placed[row_id]["y"] + placed[row_id]["height"]
+                                == stack_bottom))
+            space_top = max(space_top,
+                            edge + BLOCK_INNER_GAP_EM * first_font)
+            space_bottom = min(space_bottom,
+                               target.height - edge
+                               - BLOCK_INNER_GAP_EM * last_font)
             assert abs((stack_top - space_top)
                        - (space_bottom - stack_bottom)) <= 1.0
+
+
+def test_block_pill_gaps_hold_outer_nominal_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    rows = ("headline", "subhead", "badge_bg", "cta_bg")
+    for candidate in hero_left_candidates(source, target):
+        placed = boxes_by_id(candidate)
+        ordered = sorted(rows, key=lambda row_id: placed[row_id]["y"])
+        for lower_id, upper_id in zip(ordered, ordered[1:]):
+            lower, upper = placed[lower_id], placed[upper_id]
+            if {lower_id, upper_id} == {"headline", "subhead"}:
+                continue
+            nominal = BLOCK_OUTER_GAP_EM * max(row_font(placed, lower_id),
+                                               row_font(placed, upper_id))
+            laid = upper["y"] - (lower["y"] + lower["height"])
+            assert laid >= nominal - 1e-6
+
+
+def test_stack_keeps_edge_floors_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    edge = target.height * MARGIN_FRACTION * SAFE_BOTTOM_MARGIN_FACTOR
+    rows = ("headline", "subhead", "badge_bg", "cta_bg")
+    for candidate in hero_left_candidates(source, target):
+        placed = boxes_by_id(candidate)
+        ordered = sorted(rows, key=lambda row_id: placed[row_id]["y"])
+        first_id = ordered[0]
+        last_id = max(rows, key=lambda row_id: (placed[row_id]["y"]
+                                                + placed[row_id]["height"]))
+        assert placed[first_id]["y"] >= (
+            edge + BLOCK_INNER_GAP_EM * row_font(placed, first_id))
+        assert target.height - (placed[last_id]["y"]
+                                + placed[last_id]["height"]) >= (
+            edge + BLOCK_INNER_GAP_EM * row_font(placed, last_id))
+
+
+def test_corner_marks_use_equal_insets_on_core():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    inset = MARK_INSET_FRACTION * min(target.width, target.height)
+    for candidate in hero_left_candidates(source, target):
+        mark = boxes_by_id(candidate)["logo"]
+        horizontal = min(mark["x"],
+                         target.width - (mark["x"] + mark["width"]))
+        vertical = min(mark["y"],
+                       target.height - (mark["y"] + mark["height"]))
+        assert horizontal == pytest.approx(inset)
+        assert vertical == pytest.approx(inset)
 
 
 def test_overlay_without_image_target_stays_capped_and_disjoint():
