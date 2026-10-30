@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from engine.candidate_generator import (  # noqa: E402
+    banner_zones_candidates,
     baseline_candidate,
     hero_left_candidates,
     hero_right_candidates,
@@ -68,17 +69,16 @@ def main() -> int:
             ("stack", list(zip([m for m in modes],
                                vertical_stack_candidates(source, target)))),
         ]
-        for hero_name, hero_fn in (("hero_left", hero_left_candidates),
-                                   ("hero_right", hero_right_candidates)):
-            hero_cands = hero_fn(source, target)
-            per_mode = len(hero_cands) // len(modes)
+        for multi_name, multi_fn in (("hero_left", hero_left_candidates),
+                                        ("hero_right", hero_right_candidates),
+                                        ("zones", banner_zones_candidates)):
+            multi_cands = multi_fn(source, target)
+            per_mode = len(multi_cands) // len(modes)
             labels = []
             for mode in modes:
-                if per_mode == 2:
-                    labels += [f"{mode}_top", f"{mode}_bottom"]
-                else:
-                    labels += [mode]
-            jobs.append((hero_name, list(zip(labels, hero_cands))))
+                # orders outer, small-variants inner; index keeps labels unique.
+                labels += [f"{mode}_{index}" for index in range(per_mode)]
+            jobs.append((multi_name, list(zip(labels, multi_cands))))
         for family, candidates in jobs:
             for mode, candidate in candidates:
                 name = f"{task['difficulty']}_{family}"

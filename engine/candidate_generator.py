@@ -51,6 +51,7 @@ from engine.internal_schema import Canvas, Design, Element
 from engine.layout_edits import layout_edit
 from engine.layout_search import baseline_proposal
 from engine.layout_units import (
+    ALIGNMENT_TOLERANCE,
     LayoutUnit,
     box_iou,
     build_layout_units,
@@ -61,7 +62,12 @@ from engine.text_fit import estimate_text_height
 
 __all__ = [
     "BAND_GAP_FRACTION",
+    "BLOCK_INNER_GAP_EM",
+    "BLOCK_OUTER_GAP_EM",
     "COLUMN_GAP_FRACTION",
+    "DETACHED_OVERLAY_MAX_FRACTION",
+    "FAMILY_ASPECT_CUTOFF",
+    "FAMILY_BANNER_ZONES",
     "FAMILY_HERO_LEFT",
     "FAMILY_HERO_RIGHT",
     "FAMILY_HORIZONTAL_FLOW",
@@ -76,20 +82,26 @@ __all__ = [
     "GENERATOR_VERSION",
     "HERO_MAX_SINGLE_COLUMN_UNITS",
     "HERO_SIDE_FRACTION",
-    "HERO_TWO_COLUMN_ASPECT",
     "MARGIN_FRACTION",
+    "MAX_PACK_PASSES",
     "MIN_UNIT_SCALE",
     "OVERLAY_ATTACH_IOU_THRESHOLD",
     "OVERLAY_OPACITY_THRESHOLD",
     "PILL_ASPECT_TOLERANCE",
+    "PORTRAIT_ASPECT_CUTOFF",
+    "SAFE_BOTTOM_MARGIN_FACTOR",
     "SLOT_DIRECTION_HORIZONTAL",
     "SLOT_DIRECTION_VERTICAL",
     "SLOT_SAFETY_FACTOR",
     "SMALL_ANCHOR_MAX_FRACTION",
     "SMALL_IMAGE_AREA_FRACTION",
     "STACK_MAX_SINGLE_COLUMN_UNITS",
+    "TEXT_BLOCK_GAP_FACTOR",
+    "TEXT_LABEL_HEIGHT_EM",
+    "TEXT_ROW_PADDING_EM",
     "Slot",
     "allocate_slots",
+    "banner_zones_candidates",
     "baseline_candidate",
     "hero_left_candidates",
     "hero_right_candidates",
@@ -102,6 +114,11 @@ FAMILY_HORIZONTAL_FLOW = "HORIZONTAL_FLOW"
 FAMILY_VERTICAL_STACK = "VERTICAL_STACK"
 FAMILY_HERO_LEFT = "HERO_LEFT"
 FAMILY_HERO_RIGHT = "HERO_RIGHT"
+FAMILY_BANNER_ZONES = "BANNER_ZONES"
+# The one wide/narrow regime boundary (log-symmetric 2.0): hero columns wrap
+# below it, banner zones apply above it, and resize batch assembly skips
+# VERTICAL_STACK above it / HORIZONTAL_FLOW below its reciprocal.
+FAMILY_ASPECT_CUTOFF = 2.0
 GENERATOR_VERSION = "s04_generator_v0.1"
 
 SLOT_DIRECTION_HORIZONTAL = "horizontal"
@@ -138,9 +155,34 @@ HERO_SIDE_FRACTION = 0.5
 # Above this many hero-column units, the column wraps into two sub-columns
 # (mirrors the flow/stack two-band rule; the threshold is ours).
 HERO_MAX_SINGLE_COLUMN_UNITS = 4
-# Targets at least this wide keep one hero column (rows are already wide);
-# squarer or taller targets wrap past the threshold into two.
-HERO_TWO_COLUMN_ASPECT = 2.0
+# Bottom usable margin as a multiple of the side/top margin (optical bottom
+# weight: the last row never sits on the margin line).
+SAFE_BOTTOM_MARGIN_FACTOR = 1.5
+# Targets with aspect below this are portrait (definitional taller-than-wide);
+# hero smalls gain a top-center variant there.
+PORTRAIT_ASPECT_CUTOFF = 1.0
+# Two text units merge into one stacked block when their vertical gap is below
+# this factor of the larger line-height: the midpoint between line-tiling
+# (gap ~0, one paragraph) and paragraph breaks (~1 line).
+TEXT_BLOCK_GAP_FACTOR = 0.5
+# Packed text rows pad this many ems (at the decided size) above and below
+# the estimated text height (quarter-em inset).
+TEXT_ROW_PADDING_EM = 0.25
+# Packed gaps as multiples of the larger adjacent decided font: inner rows of
+# one block match the padding micro-grid; outer gaps are full-em breaks.
+BLOCK_INNER_GAP_EM = 0.25
+BLOCK_OUTER_GAP_EM = 1.0
+# A singleton text unit reads as a label (swappable around text blocks) when
+# its source height is at most this many ems: one line (~1.2em) plus slack,
+# well below two lines.
+TEXT_LABEL_HEIGHT_EM = 1.5
+# An overlay with no image unit to ride stays independent, capped so its
+# larger side fits this fraction of the target's shorter (binding) axis:
+# subordinate decorations share the small-marks quarter-scale.
+DETACHED_OVERLAY_MAX_FRACTION = 0.25
+# Layout/room refinement passes for packed stacks (initial plus refinements);
+# bounded and deterministic, the grid verifies every emission.
+MAX_PACK_PASSES = 3
 # Image-bearing units below this fraction of the source canvas area anchor
 # to corners instead of taking column rows (generic smallness separating
 # logos and badges from content images).
@@ -170,6 +212,16 @@ class Slot:
     height: float
 
 
+def _usable_rect(target: Canvas) -> tuple[float, float, float, float]:
+    """Usable rect: side/top margin plus the heavier optical bottom margin."""
+    full_w = float(target.width)
+    full_h = float(target.height)
+    margin = MARGIN_FRACTION
+    return (full_w * margin, full_h * margin,
+            full_w * (1 - 2 * margin),
+            full_h * (1 - margin - margin * SAFE_BOTTOM_MARGIN_FACTOR))
+
+
 def allocate_slots(unit_count: int, target: Canvas, *,
                    direction: str) -> list[Slot]:
     """Tile the usable target rect into unit_count ordered slot rects.
@@ -186,13 +238,7 @@ def allocate_slots(unit_count: int, target: Canvas, *,
     if unit_count == 0:
         return []
     horizontal = direction == SLOT_DIRECTION_HORIZONTAL
-    margin = MARGIN_FRACTION
-    full_w = float(target.width)
-    full_h = float(target.height)
-    origin_x = full_w * margin
-    origin_y = full_h * margin
-    usable_w = full_w * (1 - 2 * margin)
-    usable_h = full_h * (1 - 2 * margin)
+    origin_x, origin_y, usable_w, usable_h = _usable_rect(target)
     if horizontal:
         threshold = FLOW_MAX_SINGLE_BAND_UNITS
         gap_fraction = BAND_GAP_FRACTION
@@ -334,7 +380,8 @@ def _slot_scale_for_box(box_w: float, box_h: float,
 
 
 def _place_slotted(unit: LayoutUnit, slot: Slot,
-                   target: Canvas) -> tuple[dict[str, tuple[float, float, float, float]], float]:
+                   target: Canvas, *,
+                   cap: float = math.inf) -> tuple[dict[str, tuple[float, float, float, float]], float]:
     """Place a unit uniformly in its slot; returns member boxes and scale."""
     box_x, box_y, box_w, box_h = unit.bbox
     slot_scale = _slot_scale_for_box(box_w, box_h, slot.width, slot.height)
@@ -345,7 +392,7 @@ def _place_slotted(unit: LayoutUnit, slot: Slot,
     if room is None or room <= 0:
         scale = MIN_UNIT_SCALE
     else:
-        scale = min(slot_scale, room) * SLOT_SAFETY_FACTOR
+        scale = min(slot_scale, room, cap) * SLOT_SAFETY_FACTOR
     placed_x = center_x - box_w * scale / 2
     placed_y = center_y - box_h * scale / 2
     boxes = {}
@@ -594,6 +641,88 @@ def _merge_pills(units: list[LayoutUnit], canvas: Canvas) -> list[LayoutUnit]:
     return merged
 
 
+def _unit_line_height(unit: LayoutUnit) -> float:
+    """Largest member line-height in px (font size times multiplier)."""
+    return max(float(member.font_size)
+               * float(member.effective_value("line_height"))
+               for member in unit.members)
+
+
+def _units_aligned(first: LayoutUnit, second: LayoutUnit, canvas: Canvas) -> bool:
+    """Left/center/right unit-box edge agreement within tolerance."""
+    width = float(canvas.width)
+    if width <= 0:
+        return False
+    first_x, _, first_w, _ = first.bbox
+    second_x, _, second_w, _ = second.bbox
+    left = abs(second_x - first_x) / width
+    center = abs((second_x + second_w / 2) - (first_x + first_w / 2)) / width
+    right = abs((second_x + second_w) - (first_x + first_w)) / width
+    return min(left, center, right) <= ALIGNMENT_TOLERANCE
+
+
+def _block_continues(first: LayoutUnit, second: LayoutUnit, canvas: Canvas) -> bool:
+    """Second stacks directly under first: same column, aligned, close."""
+    first_x, first_y, first_w, first_h = first.bbox
+    second_x, second_y, second_w, second_h = second.bbox
+    gap = second_y - (first_y + first_h)
+    if gap < 0:
+        return False
+    if min(first_x + first_w, second_x + second_w) - max(first_x, second_x) <= 0:
+        return False
+    if not _units_aligned(first, second, canvas):
+        return False
+    limit = TEXT_BLOCK_GAP_FACTOR * max(_unit_line_height(first),
+                                        _unit_line_height(second))
+    return gap < limit
+
+
+def _merge_text_blocks(units: list[LayoutUnit], canvas: Canvas
+                       ) -> tuple[list[LayoutUnit], set[tuple[int, ...]]]:
+    """Merge stacked ungrouped text units into blocks; keys mark merged ones.
+
+    Candidates are all-text units without an explicit group, scanned in
+    reading order; each run whose consecutive pairs share the column, agree
+    on an edge, and sit within half a line becomes one block unit in source
+    order. Explicit groups are never merged here.
+    """
+    mergeable = [unit for unit in units
+                 if unit.group_id is None
+                 and all(member.type == "text" for member in unit.members)]
+    runs: list[list[LayoutUnit]] = []
+    for unit in sorted(mergeable, key=_order_key_flow):
+        if runs and _block_continues(runs[-1][-1], unit, canvas):
+            runs[-1].append(unit)
+        else:
+            runs.append([unit])
+    merged: dict[int, LayoutUnit] = {}
+    block_keys: set[tuple[int, ...]] = set()
+    for run in runs:
+        if len(run) < 2:
+            continue
+        pairs = sorted(
+            ((index, member) for unit in run
+             for index, member in zip(unit.source_indices, unit.members)),
+            key=lambda pair: pair[0])
+        block = LayoutUnit.of([member for _, member in pairs],
+                              [index for index, _ in pairs], canvas)
+        block_keys.add(block.source_indices)
+        for unit in run:
+            merged[id(unit)] = block
+    if not merged:
+        return list(units), block_keys
+    out = []
+    done: set[int] = set()
+    for unit in units:
+        replacement = merged.get(id(unit))
+        if replacement is None:
+            out.append(unit)
+        elif id(replacement) not in done:
+            out.append(replacement)
+            done.add(id(replacement))
+    return out, block_keys
+
+
 def _is_translucent(element: Element) -> bool:
     """Below the overlay opacity threshold (absent opacity reads 1.0)."""
     opacity = element.effective_value("opacity")
@@ -620,39 +749,77 @@ def _overlay_evidence(overlay: LayoutUnit, candidate: LayoutUnit) -> bool:
     return box_iou(overlay.bbox, candidate.bbox) > OVERLAY_ATTACH_IOU_THRESHOLD
 
 
-def _attach_overlays(units: list[LayoutUnit], canvas: Canvas) -> list[LayoutUnit]:
-    """Merge each overlay into its max-IoU non-fill overlapped unit.
+def _attach_overlays(units: list[LayoutUnit], canvas: Canvas
+                     ) -> list[tuple[LayoutUnit, LayoutUnit]]:
+    """Pair each overlay with its max-IoU image unit; the rest stay independent.
 
-    Overlays attach in source order against the current unit list; full-bleed
-    overlays stay independent so they fill downstream instead of dragging a
-    canvas-sized box into a slot. Pill units are eligible targets like any
-    other unit: the merge keeps their members together. IoU ties break by
-    source index.
+    Targets must contain an image member and pass overlap evidence: pills,
+    text, and structural shapes never receive overlays, so riders never wrap
+    them. Full-bleed overlays stay independent so they fill downstream.
+    Overlays attach in source order; IoU ties break by source index. Units
+    are returned unmerged: riders follow their target's placement instead of
+    expanding its box.
     """
-    working = list(units)
+    riders: list[tuple[LayoutUnit, LayoutUnit]] = []
     overlays = sorted((unit for unit in units if _is_overlay_unit(unit)),
                       key=lambda unit: min(unit.source_indices))
     for overlay in overlays:
-        if not any(unit is overlay for unit in working):
-            continue
         if _is_fill_unit(overlay, canvas):
             continue
-        targets = [unit for unit in working
+        targets = [unit for unit in units
                    if unit is not overlay
+                   and _has_image(unit)
                    and not _is_fill_unit(unit, canvas)
                    and _overlay_evidence(overlay, unit)]
         if not targets:
             continue
         best = max(targets, key=lambda unit: (
             box_iou(overlay.bbox, unit.bbox), -min(unit.source_indices)))
-        pairs = sorted(zip(overlay.source_indices + best.source_indices,
-                           overlay.members + best.members),
-                       key=lambda pair: pair[0])
-        merged = LayoutUnit.of([member for _, member in pairs],
-                               [index for index, _ in pairs], canvas)
-        working = [merged if unit is best else unit for unit in working]
-        working = [unit for unit in working if unit is not overlay]
-    return working
+        riders.append((overlay, best))
+    return riders
+
+
+def _placed_unit_center(unit: LayoutUnit,
+                        boxes: dict[str, tuple[float, float, float, float]]
+                        ) -> tuple[float, float]:
+    """Center of the unit's placed member boxes."""
+    left = min(boxes[member.id][0] for member in unit.members)
+    top = min(boxes[member.id][1] for member in unit.members)
+    right = max(boxes[member.id][0] + boxes[member.id][2] for member in unit.members)
+    bottom = max(boxes[member.id][1] + boxes[member.id][3] for member in unit.members)
+    return (left + right) / 2, (top + bottom) / 2
+
+
+def _rider_room(overlay: LayoutUnit, unit: LayoutUnit,
+                placed_x: float, placed_y: float, target: Canvas) -> float | None:
+    """Largest rider scale about the unit's placed center staying in-canvas.
+
+    The anchor is the unit center (which maps to the fixed slot/row center),
+    so the bound stays valid when the target rescales; member corners would
+    drift under recentering.
+    """
+    box_x, box_y, box_w, box_h = unit.bbox
+    specs = _member_specs_origin(
+        overlay, float(box_x) + float(box_w) / 2, float(box_y) + float(box_h) / 2)
+    return _max_fit_scale(specs, placed_x, placed_y,
+                          float(target.width), float(target.height))
+
+
+def _place_rider(overlay: LayoutUnit, unit: LayoutUnit,
+                 placed_x: float, placed_y: float,
+                 scale: float) -> dict[str, tuple[float, float, float, float]]:
+    """Rider boxes under the target unit's uniform transform (offsets kept)."""
+    box_x, box_y, box_w, box_h = (float(value) for value in unit.bbox)
+    origin_x = box_x + box_w / 2
+    origin_y = box_y + box_h / 2
+    rider_x, rider_y, rider_w, rider_h = (float(value) for value in overlay.bbox)
+    boxes = {}
+    for element, (fx, fy, fw, fh) in zip(overlay.members, overlay.relative_geometry):
+        boxes[element.id] = (
+            placed_x + (rider_x + fx * rider_w - origin_x) * scale,
+            placed_y + (rider_y + fy * rider_h - origin_y) * scale,
+            fw * rider_w * scale, fh * rider_h * scale)
+    return boxes
 
 
 def _pill_similar(first: LayoutUnit, second: LayoutUnit) -> bool:
@@ -693,13 +860,7 @@ def _hero_rects(target: Canvas, *, mirror: bool,
 
     Without a hero the column takes the whole usable rect.
     """
-    full_w = float(target.width)
-    full_h = float(target.height)
-    margin = MARGIN_FRACTION
-    origin_x = full_w * margin
-    origin_y = full_h * margin
-    usable_w = full_w * (1 - 2 * margin)
-    usable_h = full_h * (1 - 2 * margin)
+    origin_x, origin_y, usable_w, usable_h = _usable_rect(target)
     if not has_hero:
         return None, Slot(origin_x, origin_y, usable_w, usable_h)
     gap = usable_w * COLUMN_GAP_FRACTION
@@ -714,44 +875,142 @@ def _hero_rects(target: Canvas, *, mirror: bool,
     return hero, column
 
 
-def _column_slots(column: Slot, heights: list[float],
-                  target: Canvas) -> list[Slot]:
-    """Row slots tiling the column, heights proportional to unit extents.
+@dataclass(frozen=True, slots=True)
+class _PackedRow:
+    """One packed row: a block member text, or a whole unit placed uniformly."""
 
-    Past the threshold on a narrow target the column wraps into two
-    sub-columns (ceil-first membership); wide targets keep one column of
-    already-wide rows. Slots come back in unit order.
+    unit: LayoutUnit
+    member: Element | None
+
+
+def _is_upright_text(member: Element) -> bool:
+    """Text with no effective rotation: reflowable in packed rows."""
+    return (member.type == "text"
+            and float(member.effective_value("rotation")) % 360 == 0)
+
+
+def _rows_for_units(units: list[LayoutUnit],
+                    block_keys: set[tuple[int, ...]]) -> list[_PackedRow]:
+    """Member rows for reflowable texts, unit rows for locked compositions.
+
+    Merged blocks and ungrouped singleton texts reflow one row per member
+    (top order) when every text is upright; explicit groups, pills, images,
+    shapes, overlays, and any rotated text keep their internal geometry in
+    a single uniform row.
     """
-    count = len(heights)
-    if count == 0:
-        return []
-    aspect = (float(target.width) / float(target.height)
-              if target.height > 0 else math.inf)
-    if count <= HERO_MAX_SINGLE_COLUMN_UNITS or aspect >= HERO_TWO_COLUMN_ASPECT:
-        groups = [list(range(count))]
-        spans = [(column.x, column.width)]
-    else:
-        first = (count + 1) // 2
-        groups = [list(range(first)), list(range(first, count))]
-        gap = column.width * COLUMN_GAP_FRACTION
-        sub_w = (column.width - gap) / 2
-        spans = [(column.x, sub_w), (column.x + sub_w + gap, sub_w)]
-    slots: list[Slot | None] = [None] * count
-    for (left, width), members in zip(spans, groups):
-        total = sum(heights[index] for index in members)
-        if total <= 0:
-            rows = [column.height / len(members)] * len(members)
+    rows = []
+    for unit in units:
+        reflowable = (
+            unit.source_indices in block_keys
+            or (unit.group_id is None and len(unit.members) == 1
+                and unit.members[0].type == "text")
+        ) and all(_is_upright_text(member) for member in unit.members
+                  if member.type == "text")
+        if reflowable and any(member.type == "text" for member in unit.members):
+            members = sorted((member for member in unit.members
+                              if member.type == "text"),
+                             key=lambda item: (item.y, item.x))
+            rows.extend(_PackedRow(unit, member) for member in members)
         else:
-            rows = [column.height * heights[index] / total for index in members]
-        top = column.y
-        for index, height in zip(members, rows):
-            slots[index] = Slot(left, top, width, height)
-            top += height
-    return [slot for slot in slots if slot is not None]
+            rows.append(_PackedRow(unit, None))
+    return rows
+
+
+def _row_font(row: _PackedRow, fonts: dict[str, float]) -> float:
+    """Largest decided font among the row's texts, else 0.0."""
+    if row.member is not None:
+        return fonts[row.member.id]
+    return max((fonts[member.id] for member in row.unit.members
+                if member.type == "text"),
+               default=0.0)
+
+
+def _row_nominal_scale(row: _PackedRow, width: float, target: Canvas) -> float:
+    """Width-driven row scale before rider caps (pill/overlay caps included)."""
+    unit = row.unit
+    unit_w = float(unit.bbox[2])
+    if row.member is not None:
+        member_w = float(row.member.width)
+        return width / member_w if member_w > 0 else 1.0
+    if _is_pill_unit(unit):
+        return min(1.0, width / unit_w) if unit_w > 0 else 1.0
+    if _is_overlay_unit(unit):
+        nominal = width / unit_w if unit_w > 0 else 1.0
+        longest = max(unit_w, float(unit.bbox[3]))
+        if longest > 0:
+            cap = (DETACHED_OVERLAY_MAX_FRACTION
+                   * min(float(target.width), float(target.height)) / longest)
+            nominal = min(nominal, cap)
+        return nominal
+    return width / unit_w if unit_w > 0 else 1.0
+
+
+def _pack_container(rows: list[_PackedRow], rect: Slot,
+                    fonts: dict[str, float], caps: dict[int, float],
+                    target: Canvas) -> tuple[list[Slot], list[float]]:
+    """Packed rows in rect: text rows estimate-sized, rest uniform, centered.
+
+    Text rows take the full width with height from estimate_text_height plus
+    padding; pills render at natural size at most; independent overlays are
+    capped to the detached fraction; images and shapes width-fit. Inner gaps
+    separate block siblings, outer gaps separate blocks and units, and the
+    stack reserves a rhythm pad at the bottom, clamping uniformly when the
+    column is short. Returns row slots and scales in row order.
+    """
+    if not rows:
+        return [], []
+    col_w = float(rect.width)
+    scales = []
+    for row in rows:
+        nominal = _row_nominal_scale(row, col_w, target)
+        scales.append(min(nominal, caps.get(id(row.unit), math.inf)))
+    heights = []
+    for row, scale in zip(rows, scales):
+        if row.member is not None:
+            member = row.member
+            font = fonts[member.id]
+            estimated = estimate_text_height(
+                member.content, col_w, font,
+                float(member.effective_value("line_height")))
+            heights.append(float(estimated or 0) + 2 * TEXT_ROW_PADDING_EM * font)
+        else:
+            heights.append(float(row.unit.bbox[3]) * scale)
+    row_fonts = [_row_font(row, fonts) for row in rows]
+    gaps = []
+    for first, second, font_first, font_second in zip(rows, rows[1:],
+                                                      row_fonts, row_fonts[1:]):
+        factor = BLOCK_INNER_GAP_EM if first.unit is second.unit else BLOCK_OUTER_GAP_EM
+        gaps.append(factor * max(font_first, font_second))
+    stack_max = max(row_fonts, default=0.0)
+    last_font = row_fonts[-1] if row_fonts[-1] > 0 else stack_max
+    bottom_pad = BLOCK_OUTER_GAP_EM * last_font
+    total = sum(heights) + sum(gaps)
+    avail = max(0.0, float(rect.height) - bottom_pad)
+    if total > avail and total > 0:
+        clamp = avail / total
+    else:
+        clamp = 1.0
+    heights = [height * clamp for height in heights]
+    gaps = [gap * clamp for gap in gaps]
+    scales = [scale * clamp for scale in scales]
+    slots = []
+    cursor = float(rect.y) + max(0.0, avail - sum(heights) - sum(gaps)) / 2
+    for row, height, scale, index in zip(rows, heights, scales, range(len(rows))):
+        if row.member is not None:
+            slots.append(Slot(float(rect.x), cursor, col_w, height))
+        else:
+            width = float(row.unit.bbox[2]) * scale
+            slots.append(Slot(float(rect.x) + (col_w - width) / 2, cursor,
+                              width, height))
+        cursor += height
+        if index < len(gaps):
+            cursor += gaps[index]
+    return slots, scales
 
 
 def _place_anchored(unit: LayoutUnit, target: Canvas, *,
-                    top: bool, left: bool) -> tuple[dict[str, tuple[float, float, float, float]], float]:
+                    top: bool, left: bool,
+                    cap: float = math.inf) -> tuple[dict[str, tuple[float, float, float, float]], float]:
     """Pin a small unit's box corner to a canvas corner, shrinking to fit.
 
     The unit fits inside the anchor fraction of each axis and never upscales
@@ -777,7 +1036,7 @@ def _place_anchored(unit: LayoutUnit, target: Canvas, *,
     if room is None or room <= 0:
         scale = MIN_UNIT_SCALE
     else:
-        scale = min(fit, 1.0, room) * SLOT_SAFETY_FACTOR
+        scale = min(fit, 1.0, room, cap) * SLOT_SAFETY_FACTOR
     boxes = {}
     for element, (fx, fy, fw, fh) in zip(unit.members, unit.relative_geometry):
         boxes[element.id] = (
@@ -792,83 +1051,470 @@ def _has_image(unit: LayoutUnit) -> bool:
     return any(member.type == "image" for member in unit.members)
 
 
+def _assembly_units(source: Design, group_mode: str
+                    ) -> tuple[list[LayoutUnit], set[tuple[int, ...]],
+                               list[tuple[LayoutUnit, LayoutUnit]]]:
+    """Units for hero/zones: pills and text blocks merged, overlays attached."""
+    canvas = source.source_canvas
+    merged = _merge_pills(
+        list(build_layout_units(source, group_mode=group_mode)), canvas)
+    units, block_keys = _merge_text_blocks(merged, canvas)
+    return units, block_keys, _attach_overlays(units, canvas)
+
+
+def _is_label_unit(unit: LayoutUnit) -> bool:
+    """Pill, or a singleton text short enough to read as a label."""
+    if _is_pill_unit(unit):
+        return True
+    if len(unit.members) != 1 or unit.members[0].type != "text":
+        return False
+    only = unit.members[0]
+    return float(only.height) <= TEXT_LABEL_HEIGHT_EM * float(only.font_size)
+
+
+def _order_variants(order: list[LayoutUnit],
+                    block_keys: set[tuple[int, ...]]) -> list[list[LayoutUnit]]:
+    """Base order plus one single-swap candidate per block/label adjacency."""
+    variants = [list(order)]
+    for index in range(len(order) - 1):
+        first, second = order[index], order[index + 1]
+        first_block = first.source_indices in block_keys
+        second_block = second.source_indices in block_keys
+        if ((first_block and _is_label_unit(second))
+                or (second_block and _is_label_unit(first))):
+            swapped = list(order)
+            swapped[index], swapped[index + 1] = swapped[index + 1], swapped[index]
+            variants.append(swapped)
+    return variants
+
+
+def _distinct_orders(orders: list[list[LayoutUnit]]) -> list[list[LayoutUnit]]:
+    """Drop orders the anti pass converged back to an earlier sequence."""
+    seen: set[tuple[int, ...]] = set()
+    distinct = []
+    for order in orders:
+        key = tuple(id(unit) for unit in order)
+        if key not in seen:
+            seen.add(key)
+            distinct.append(order)
+    return distinct
+
+
+def _split_subcolumns(ordered: list[LayoutUnit],
+                      target: Canvas) -> list[list[LayoutUnit]]:
+    """Ceil-first halves past the threshold on narrow targets, else one group."""
+    aspect = (float(target.width) / float(target.height)
+              if target.height > 0 else math.inf)
+    if len(ordered) <= HERO_MAX_SINGLE_COLUMN_UNITS or aspect >= FAMILY_ASPECT_CUTOFF:
+        return [list(ordered)]
+    first = (len(ordered) + 1) // 2
+    return [list(ordered[:first]), list(ordered[first:])]
+
+
+def _subcolumn_rects(column: Slot, count: int) -> list[Slot]:
+    """One rect, or two with the column gap between them."""
+    if count <= 1:
+        return [column]
+    gap = column.width * COLUMN_GAP_FRACTION
+    sub_w = (column.width - gap) / 2
+    return [Slot(column.x, column.y, sub_w, column.height),
+            Slot(column.x + sub_w + gap, column.y, sub_w, column.height)]
+
+
+def _assign_small_corners(smalls: list[LayoutUnit], prefs: list[bool]
+                          ) -> tuple[list[tuple[LayoutUnit, bool]], list[LayoutUnit]]:
+    """Preferred corner, flipped side when taken, column overflow when both fill."""
+    taken: set[bool] = set()
+    anchored = []
+    overflow = []
+    for unit, prefer in zip(smalls, prefs):
+        side = prefer
+        if side in taken:
+            side = not side
+        if side in taken:
+            overflow.append(unit)
+        else:
+            taken.add(side)
+            anchored.append((unit, side))
+    return anchored, overflow
+
+
+def _small_variants(target: Canvas) -> tuple[str, ...]:
+    """Top/bottom corner rows, plus top-center on portrait targets."""
+    aspect = (float(target.width) / float(target.height)
+              if target.height > 0 else math.inf)
+    if aspect < PORTRAIT_ASPECT_CUTOFF:
+        return ("top", "bottom", "center")
+    return ("top", "bottom")
+
+
+def _place_centered(smalls: list[LayoutUnit], target: Canvas,
+                    caps: dict[int, float]) -> tuple[dict[str, tuple[float, float, float, float]], dict[str, float]]:
+    """Portrait variant: smalls stacked touching, centered, from the top inset."""
+    canvas_w = float(target.width)
+    canvas_h = float(target.height)
+    anchor_w = canvas_w * SMALL_ANCHOR_MAX_FRACTION
+    anchor_h = canvas_h * SMALL_ANCHOR_MAX_FRACTION
+    inset_y = canvas_h * (1 - SLOT_SAFETY_FACTOR)
+    scales = []
+    for unit in smalls:
+        fit = _slot_scale_for_box(float(unit.bbox[2]), float(unit.bbox[3]),
+                                  anchor_w, anchor_h)
+        scales.append(min(fit, 1.0, caps.get(id(unit), math.inf)) * SLOT_SAFETY_FACTOR)
+    for _ in range(2):
+        cursor = inset_y
+        shrunk = False
+        restacked = []
+        for unit, scale in zip(smalls, scales):
+            box_h = float(unit.bbox[3]) * scale
+            room = _max_fit_scale(_member_specs(unit), canvas_w / 2,
+                                  cursor + box_h / 2, canvas_w, canvas_h)
+            if room is None or room <= 0:
+                restacked.append(MIN_UNIT_SCALE)
+                shrunk = True
+            elif room < scale:
+                restacked.append(room * SLOT_SAFETY_FACTOR)
+                shrunk = True
+            else:
+                restacked.append(scale)
+            cursor += box_h
+        scales = restacked
+        if not shrunk:
+            break
+    boxes: dict[str, tuple[float, float, float, float]] = {}
+    out_scales: dict[str, float] = {}
+    cursor = inset_y
+    for unit, scale in zip(smalls, scales):
+        box_w = float(unit.bbox[2]) * scale
+        box_h = float(unit.bbox[3]) * scale
+        left = (canvas_w - box_w) / 2
+        for element, (fx, fy, fw, fh) in zip(unit.members, unit.relative_geometry):
+            boxes[element.id] = (left + fx * box_w, cursor + fy * box_h,
+                                 fw * box_w, fh * box_h)
+            out_scales[element.id] = scale
+        cursor += box_h
+    return boxes, out_scales
+
+
+def _run_pack_passes(
+    source: Design, target: Canvas, *,
+    pack_jobs: list[tuple[list[_PackedRow], Slot]],
+    fit_jobs: list[tuple[LayoutUnit, Slot, float]],
+    anchor_jobs: list[tuple[LayoutUnit, bool, bool]],
+    center_units: list[LayoutUnit],
+    fill_units: list[LayoutUnit],
+    riders: list[tuple[LayoutUnit, LayoutUnit]],
+) -> tuple[dict[str, tuple[float, float, float, float]], dict[str, float], dict[str, float]]:
+    """Bounded layout/room loop; returns (boxes, scales, fonts).
+
+    Each pass decides fonts in provisional tall boxes, lays out packed rows
+    with clamping, places fits/anchors/fills, and caps rider-bound and
+    rotation-bound targets; the loop stops early when caps stabilize. Final
+    fonts are decided in the final boxes.
+    """
+    canvas_w = float(target.width)
+    canvas_h = float(target.height)
+    caps: dict[int, float] = {}
+    boxes: dict[str, tuple[float, float, float, float]] = {}
+    scales: dict[str, float] = {}
+    for _ in range(MAX_PACK_PASSES):
+        tall: dict[str, tuple[float, float, float, float]] = {}
+        seeds: dict[str, float] = {}
+        for rows, rect in pack_jobs:
+            for row in rows:
+                scale = min(_row_nominal_scale(row, float(rect.width), target),
+                            caps.get(id(row.unit), math.inf))
+                if row.member is not None:
+                    tall[row.member.id] = (rect.x, rect.y, rect.width, rect.height)
+                    seeds[row.member.id] = scale
+                else:
+                    box_w = float(row.unit.bbox[2])
+                    box_h = float(row.unit.bbox[3])
+                    for element, (fx, fy, fw, fh) in zip(row.unit.members,
+                                                         row.unit.relative_geometry):
+                        if element.type == "text":
+                            tall[element.id] = (
+                                float(rect.x) + fx * box_w * scale,
+                                float(rect.y) + fy * box_h * scale,
+                                fw * box_w * scale, fh * box_h * scale)
+                            seeds[element.id] = scale
+        for unit, slot, base_cap in fit_jobs:
+            placed, scale = _place_slotted(
+                unit, slot, target,
+                cap=min(base_cap, caps.get(id(unit), math.inf)))
+            for element in unit.members:
+                if element.type == "text":
+                    tall[element.id] = placed[element.id]
+                    seeds[element.id] = scale
+        for unit, top, left in anchor_jobs:
+            placed, scale = _place_anchored(
+                unit, target, top=top, left=left,
+                cap=caps.get(id(unit), math.inf))
+            for element in unit.members:
+                if element.type == "text":
+                    tall[element.id] = placed[element.id]
+                    seeds[element.id] = scale
+        if center_units:
+            placed, center_scales = _place_centered(center_units, target, caps)
+            for unit in center_units:
+                for element in unit.members:
+                    if element.type == "text":
+                        tall[element.id] = placed[element.id]
+                        seeds[element.id] = center_scales[element.id]
+        for unit in fill_units:
+            placed = _place_fill(unit, target)
+            for element in unit.members:
+                if element.type == "text":
+                    tall[element.id] = placed[element.id]
+                    seeds[element.id] = 1.0
+        fonts = _decide_font_sizes(source, tall, seeds)
+        boxes = {}
+        scales = {}
+        row_slots: list[tuple[_PackedRow, Slot, float]] = []
+        for rows, rect in pack_jobs:
+            slots, row_scales = _pack_container(rows, rect, fonts, caps, target)
+            for row, slot, scale in zip(rows, slots, row_scales):
+                row_slots.append((row, slot, scale))
+                if row.member is not None:
+                    boxes[row.member.id] = (slot.x, slot.y, slot.width, slot.height)
+                    scales[row.member.id] = scale
+                else:
+                    box_w = float(row.unit.bbox[2])
+                    box_h = float(row.unit.bbox[3])
+                    for element, (fx, fy, fw, fh) in zip(row.unit.members,
+                                                         row.unit.relative_geometry):
+                        boxes[element.id] = (
+                            slot.x + fx * box_w * scale,
+                            slot.y + fy * box_h * scale,
+                            fw * box_w * scale, fh * box_h * scale)
+                        scales[element.id] = scale
+        for unit, slot, base_cap in fit_jobs:
+            placed, scale = _place_slotted(
+                unit, slot, target,
+                cap=min(base_cap, caps.get(id(unit), math.inf)))
+            boxes.update(placed)
+            for element in unit.members:
+                scales[element.id] = scale
+        for unit, top, left in anchor_jobs:
+            placed, scale = _place_anchored(
+                unit, target, top=top, left=left,
+                cap=caps.get(id(unit), math.inf))
+            boxes.update(placed)
+            for element in unit.members:
+                scales[element.id] = scale
+        if center_units:
+            placed, center_scales = _place_centered(center_units, target, caps)
+            boxes.update(placed)
+            scales.update(center_scales)
+        for unit in fill_units:
+            boxes.update(_place_fill(unit, target))
+            for element in unit.members:
+                scales[element.id] = 1.0
+        new_caps: dict[int, float] = {}
+        for row, slot, _ in row_slots:
+            if row.member is not None:
+                continue
+            specs = _member_specs(row.unit)
+            room = _max_fit_scale(specs, slot.x + slot.width / 2,
+                                  slot.y + slot.height / 2, canvas_w, canvas_h)
+            if room is None or room <= 0:
+                cap = MIN_UNIT_SCALE
+            else:
+                cap = room * SLOT_SAFETY_FACTOR
+            key = id(row.unit)
+            new_caps[key] = min(new_caps.get(key, math.inf), cap)
+        for overlay, overlay_target in riders:
+            center_x, center_y = _placed_unit_center(overlay_target, boxes)
+            room = _rider_room(overlay, overlay_target, center_x, center_y, target)
+            if room is None or room <= 0:
+                cap = MIN_UNIT_SCALE
+            else:
+                cap = room * SLOT_SAFETY_FACTOR
+            key = id(overlay_target)
+            new_caps[key] = min(new_caps.get(key, math.inf), cap)
+        if new_caps == caps:
+            break
+        caps = new_caps
+    rider_target_scale: dict[int, float] = {}
+    for _, overlay_target in riders:
+        key = id(overlay_target)
+        if key not in rider_target_scale:
+            rider_target_scale[key] = scales[overlay_target.members[0].id]
+    for overlay, overlay_target in riders:
+        center_x, center_y = _placed_unit_center(overlay_target, boxes)
+        scale = rider_target_scale[id(overlay_target)]
+        boxes.update(_place_rider(overlay, overlay_target, center_x, center_y, scale))
+        for element in overlay.members:
+            scales[element.id] = scale
+    fonts = _decide_font_sizes(source, boxes, scales)
+    return boxes, scales, fonts
+
+
+def _small_prefs(smalls: list[LayoutUnit], canvas: Canvas, *,
+                 mirror: bool, has_hero: bool) -> list[bool]:
+    """Preferred corner sides: opposite the hero, else the source side."""
+    prefs = []
+    for unit in smalls:
+        if has_hero:
+            prefs.append(bool(mirror))
+        else:
+            center_x = unit.bbox[0] + unit.bbox[2] / 2
+            prefs.append(center_x <= float(canvas.width) / 2)
+    return prefs
+
+
 def _hero_candidates(source: Design, target: Canvas, *,
                      mirror: bool) -> list[dict[str, Any]]:
-    """Hero panel plus reading-ordered column, per group mode and variant.
+    """Hero panel plus packed reading-ordered column, per mode/order/variant.
 
-    The largest-area non-small non-fill image unit heroes (small units are
-    never dominant enough to hero; the largest slotted unit steps in when no
-    image unit qualifies); small image units anchor to corners with top and
-    bottom variants; the rest stack in reading order with similar pills
-    separated. Fill and canvas-fit units keep their usual paths.
+    The largest-area non-small non-fill image unit heroes (the largest
+    slotted unit steps in when no image unit qualifies); smalls anchor
+    opposite the hero with top/bottom rows (plus top-center on portrait
+    targets); the rest pack in reading order with similar pills separated
+    and label/block orders varied. Fill and canvas-fit units keep paths.
     """
     canvas = source.source_canvas
     canvas_area = float(canvas.width) * float(canvas.height)
     target_w = float(target.width)
     target_h = float(target.height)
+    small_limit = SMALL_IMAGE_AREA_FRACTION * canvas_area
     results = []
     for mode in required_group_modes(source):
-        units = _attach_overlays(
-            _merge_pills(build_layout_units(source, group_mode=mode), canvas),
-            canvas)
+        units, block_keys, riders = _assembly_units(source, mode)
         fills, fits, slotted = _partition_units(units, canvas)
-        small_limit = SMALL_IMAGE_AREA_FRACTION * canvas_area
-        image_units = [unit for unit in slotted
+        rider_ids = {id(overlay) for overlay, _ in riders}
+        free = [unit for unit in slotted if id(unit) not in rider_ids]
+        image_units = [unit for unit in free
                        if _has_image(unit)
                        and unit.bbox[2] * unit.bbox[3] >= small_limit]
-        pool = image_units or slotted
+        pool = image_units or free
         if pool:
             hero = max(pool, key=lambda unit: (
                 unit.bbox[2] * unit.bbox[3], -min(unit.source_indices)))
         else:
             hero = None
-        rest = [unit for unit in slotted if unit is not hero]
+        has_hero = hero is not None
+        rest = [unit for unit in free if unit is not hero]
         smalls = sorted(
             (unit for unit in rest
              if _has_image(unit)
              and unit.bbox[2] * unit.bbox[3] < small_limit),
             key=lambda unit: min(unit.source_indices))
-        small_ids = {id(unit) for unit in smalls}
-        column_units = [unit for unit in rest if id(unit) not in small_ids]
-        ordered = _separate_pills(sorted(column_units, key=_order_key_flow))
+        anchored, _ = _assign_small_corners(
+            smalls, _small_prefs(smalls, canvas, mirror=mirror, has_hero=has_hero))
+        anchored_ids = {id(unit) for unit, _ in anchored}
+        column_base = [unit for unit in rest if id(unit) not in anchored_ids]
+        base = sorted(column_base, key=_order_key_flow)
+        orders = _distinct_orders(
+            [_separate_pills(variant)
+             for variant in _order_variants(base, block_keys)])
         hero_slot, column_slot = _hero_rects(
-            target, mirror=mirror, has_hero=hero is not None)
-        row_slots = _column_slots(
-            column_slot, [unit.bbox[3] for unit in ordered], target)
-        variants = ((True, False) if smalls else (True,))
-        for variant_top in variants:
-            boxes: dict[str, tuple[float, float, float, float]] = {}
-            scales: dict[str, float] = {}
-            if hero is not None and hero_slot is not None:
-                placed, scale = _place_slotted(hero, hero_slot, target)
-                boxes.update(placed)
-                for member in hero.members:
-                    scales[member.id] = scale
-            for unit, slot in zip(ordered, row_slots):
-                placed, scale = _place_slotted(unit, slot, target)
-                boxes.update(placed)
-                for member in unit.members:
-                    scales[member.id] = scale
-            for unit in smalls:
-                center_x = unit.bbox[0] + unit.bbox[2] / 2
-                placed, scale = _place_anchored(
-                    unit, target, top=variant_top,
-                    left=center_x <= float(canvas.width) / 2)
-                boxes.update(placed)
-                for member in unit.members:
-                    scales[member.id] = scale
-            for unit in fills:
-                boxes.update(_place_fill(unit, target))
-                for member in unit.members:
-                    scales[member.id] = 1.0
-            canvas_slot = Slot(0.0, 0.0, target_w, target_h)
-            for unit in fits:
-                placed, scale = _place_slotted(unit, canvas_slot, target)
-                boxes.update(placed)
-                for member in unit.members:
-                    scales[member.id] = scale
-            fonts = _decide_font_sizes(source, boxes, scales)
-            results.append(_emit_candidate(source, target, boxes, scales, fonts))
+            target, mirror=mirror, has_hero=has_hero)
+        canvas_slot = Slot(0.0, 0.0, target_w, target_h)
+        fit_jobs = ([(hero, hero_slot, math.inf)]
+                    if hero is not None and hero_slot is not None else [])
+        fit_jobs += [(unit, canvas_slot, math.inf) for unit in fits]
+        variants = _small_variants(target) if smalls else (None,)
+        for order in orders:
+            groups = _split_subcolumns(order, target)
+            rects = _subcolumn_rects(column_slot, len(groups))
+            pack_jobs = [(_rows_for_units(group, block_keys), rect)
+                         for group, rect in zip(groups, rects)]
+            for variant in variants:
+                if variant == "center":
+                    anchor_jobs: list[tuple[LayoutUnit, bool, bool]] = []
+                    center_units = [unit for unit, _ in anchored]
+                elif variant is None:
+                    anchor_jobs = []
+                    center_units = []
+                else:
+                    anchor_jobs = [(unit, variant == "top", side)
+                                   for unit, side in anchored]
+                    center_units = []
+                boxes, scales, fonts = _run_pack_passes(
+                    source, target, pack_jobs=pack_jobs, fit_jobs=fit_jobs,
+                    anchor_jobs=anchor_jobs, center_units=center_units,
+                    fill_units=fills, riders=riders)
+                results.append(_emit_candidate(source, target, boxes, scales, fonts))
+    return results
+
+
+def _zone_rects(ordered: list[LayoutUnit], target: Canvas) -> list[Slot]:
+    """Band zones in order, widths proportional to source unit widths."""
+    origin_x, origin_y, usable_w, usable_h = _usable_rect(target)
+    count = len(ordered)
+    if count == 0:
+        return []
+    gap = usable_w * COLUMN_GAP_FRACTION
+    total = sum(float(unit.bbox[2]) for unit in ordered)
+    net = usable_w - gap * (count - 1)
+    if total > 0:
+        widths = [net * float(unit.bbox[2]) / total for unit in ordered]
+    else:
+        widths = [net / count] * count
+    rects = []
+    left = origin_x
+    for width in widths:
+        rects.append(Slot(left, origin_y, width, usable_h))
+        left += width + gap
+    return rects
+
+
+def banner_zones_candidates(source: Design, target: Canvas) -> list[dict[str, Any]]:
+    """BANNER_ZONES: one band of content-sized zones in reading order.
+
+    Every slotted non-small unit takes a zone sized by its source width with
+    packed rows inside; smalls anchor (source sides, no hero to oppose);
+    label/block orders vary like hero columns. Resize applies this family on
+    targets wider than FAMILY_ASPECT_CUTOFF.
+    """
+    canvas = source.source_canvas
+    canvas_area = float(canvas.width) * float(canvas.height)
+    target_w = float(target.width)
+    target_h = float(target.height)
+    small_limit = SMALL_IMAGE_AREA_FRACTION * canvas_area
+    results = []
+    for mode in required_group_modes(source):
+        units, block_keys, riders = _assembly_units(source, mode)
+        fills, fits, slotted = _partition_units(units, canvas)
+        rider_ids = {id(overlay) for overlay, _ in riders}
+        free = [unit for unit in slotted if id(unit) not in rider_ids]
+        smalls = sorted(
+            (unit for unit in free
+             if _has_image(unit)
+             and unit.bbox[2] * unit.bbox[3] < small_limit),
+            key=lambda unit: min(unit.source_indices))
+        anchored, _ = _assign_small_corners(
+            smalls, _small_prefs(smalls, canvas, mirror=False, has_hero=False))
+        anchored_ids = {id(unit) for unit, _ in anchored}
+        zone_base = [unit for unit in free if id(unit) not in anchored_ids]
+        base = sorted(zone_base, key=_order_key_flow)
+        orders = _distinct_orders(
+            [_separate_pills(variant)
+             for variant in _order_variants(base, block_keys)])
+        canvas_slot = Slot(0.0, 0.0, target_w, target_h)
+        fit_jobs = [(unit, canvas_slot, math.inf) for unit in fits]
+        variants = _small_variants(target) if smalls else (None,)
+        for order in orders:
+            rects = _zone_rects(order, target)
+            pack_jobs = [(_rows_for_units([unit], block_keys), rect)
+                         for unit, rect in zip(order, rects)]
+            for variant in variants:
+                if variant == "center":
+                    anchor_jobs: list[tuple[LayoutUnit, bool, bool]] = []
+                    center_units = [unit for unit, _ in anchored]
+                elif variant is None:
+                    anchor_jobs = []
+                    center_units = []
+                else:
+                    anchor_jobs = [(unit, variant == "top", side)
+                                   for unit, side in anchored]
+                    center_units = []
+                boxes, scales, fonts = _run_pack_passes(
+                    source, target, pack_jobs=pack_jobs, fit_jobs=fit_jobs,
+                    anchor_jobs=anchor_jobs, center_units=center_units,
+                    fill_units=fills, riders=riders)
+                results.append(_emit_candidate(source, target, boxes, scales, fonts))
     return results
 
 

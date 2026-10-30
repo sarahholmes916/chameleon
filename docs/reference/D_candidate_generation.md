@@ -1,11 +1,11 @@
 # Appendix D — S04 candidate generation and diversification (planned design)
 
-> **Appendix D of [TECHNICAL_SPEC.md](../TECHNICAL_SPEC.md).** Status: **planned**. None of this is
-> implemented: there is no `candidate_generator`, `layout_units`, `layout_objective` or `diversify`
-> module. Only the iterative retry loop `find_valid_layout` and the proportional repair
-> `baseline_proposal` exist (spec §5). All thresholds, weights and families below are proposed engineering
-> defaults to be verified experimentally, not Adobe rules. Constraints on candidates are defined only in
-> spec §8; the interface of the batch generator is in spec §2.3.
+> **Appendix D of [TECHNICAL_SPEC.md](../TECHNICAL_SPEC.md).** Status: **partially implemented**.
+> Implemented: `layout_units`, `layout_objective` (provisional weights), and `candidate_generator` with
+> `SCALE_BASELINE`, `VERTICAL_STACK`, `HORIZONTAL_FLOW`, `HERO_LEFT`, `HERO_RIGHT`, `BANNER_ZONES`
+> (engine/candidate_generator.py). Planned: `TWO_COLUMN`, `CONTROLLED_OVERLAY`, continuous geometry
+> refinement, and diversification (D.2). Thresholds, weights and families are proposed engineering defaults
+> to be verified experimentally, not Adobe rules. Constraints: spec §8; batch interface: spec §2.3.
 
 ## D.1 Candidate generation policy
 
@@ -24,14 +24,15 @@ Initial composition-family enum and expected trial count:
 | Family | Policy | Trials |
 |---|---|---:|
 | `SCALE_BASELINE` | Proportional affine scale + translation, then repair | 2 |
-| `VERTICAL_STACK` | Order high-level soft units vertically with alignment variants | 4 |
-| `HORIZONTAL_FLOW` | Put units into one or two horizontal bands | 4 |
+| `VERTICAL_STACK` | Order high-level soft units vertically with alignment variants | modes (implemented) |
+| `HORIZONTAL_FLOW` | Put units into one or two horizontal bands | modes (implemented) |
 | `TWO_COLUMN` | Allocate left/right regions when target ratio permits | 4 |
-| `HERO_LEFT` | Largest source image region on left, other units to right | 3 |
-| `HERO_RIGHT` | Mirrored hero arrangement | 3 |
+| `HERO_LEFT` | Largest image unit heroes left; packed reading-ordered column right (D.1.3) | modes × orders × small-variants (implemented) |
+| `HERO_RIGHT` | Mirrored hero arrangement | modes × orders × small-variants (implemented) |
+| `BANNER_ZONES` | One band of content-sized zones in reading order (D.1.3); resize-gated above `FAMILY_ASPECT_CUTOFF` | modes × orders × small-variants (implemented) |
 | `CONTROLLED_OVERLAY` | Allow text/shape/image intentional layering inferred from source containment and z evidence | 4 |
 
-In every family a text element's `font_size` is proposed together with its box (D.1.4); a family that only moves or resizes boxes is incomplete. These 24 trials are *proposal seeds*, not a guarantee of 24 valid or distinct outputs. Applicability checks suppress unhelpful families (e.g., two-column arrangement for very tall narrow targets). "Largest image" uses bounding-box area, **not** an inferred semantic product role. Every proposal must pass the same validator before learned ranking. The baseline can be used even with no NLP encoder/model checkpoint.
+In every family a text element's `font_size` is proposed together with its box (D.1.4); a family that only moves or resizes boxes is incomplete. Per-family trial counts are *proposal seeds*, not a guarantee of valid or distinct outputs. Applicability checks suppress unhelpful families (e.g., two-column arrangement for very tall narrow targets); the one wide/narrow boundary is `FAMILY_ASPECT_CUTOFF = 2.0`. "Largest image" uses bounding-box area, **not** an inferred semantic product role. Every proposal must pass the same validator before learned ranking. The baseline can be used even with no NLP encoder/model checkpoint.
 
 Defaults: `max_raw_candidates=32`, `max_valid_candidates=12`, deterministic RNG seed `42` for repeatable development, generator time budget initially `1.0s` on the reference CPU (must measure and adapt against submission time limits), and best 3 diverse internal options. Do not promise latency until benchmarked.
 
@@ -41,7 +42,7 @@ For each family, first classify **background-like candidates for search only**: 
 
 Define candidate **layout units** as connected components of strong soft-pairing edges with association >= 0.75, but exclude background-like nodes from that grouping and cap each inferred unit at 6 nodes. Start with explicit same-group associations (where geometrically appropriate), then consider proximity edges in descending score with stable source-index tie-breaks. Unit membership exists only during candidate search; explicit Adobe `group_id` is never changed. Maintain each unit's source bounding rectangle and member-relative fractional positions. A shape that contains text can remain a separate overlay layer rather than be forced into the same rigid packing box.
 
-For `HORIZONTAL_FLOW`, compute usable width `TW*(1-2m)` and height `TH*(1-2m)`, with initial margin fraction `m=0.04`; order units by source top coordinate then left coordinate (ties by source index), assign consecutive units left-to-right to evenly spaced region slots, and uniformly scale each unit to fit its assigned slot while preserving member-relative geometry. For `VERTICAL_STACK`, swap axes; for `TWO_COLUMN`, place alternating units by descending source unit area in the currently less-occupied column, breaking ties by source order. `HERO_LEFT/RIGHT` allocates an initial 45% width to the largest image-containing unit and 55% to the rest, then runs vertical sublayout on the remainder. `CONTROLLED_OVERLAY` starts with horizontal/vertical flow and separately reinstates candidate overlaps for source-overlapping pairs; it must retain original stacking semantics. All families run the same subsequent local geometry optimizer. These percentages/order policies are deterministic **seeding defaults** and must be tuned or rejected on evaluation; they are not claimed as inherently attractive designs.
+For `HORIZONTAL_FLOW`, compute usable width `TW*(1-2m)` and height `TH*(1-m-m*1.5)`, with initial margin fraction `m=0.04` (the bottom margin is 1.5× the sides so the last row never sits on the margin line); order units by source top coordinate then left coordinate (ties by source index), assign consecutive units left-to-right to evenly spaced region slots, and uniformly scale each unit to fit its assigned slot while preserving member-relative geometry. For `VERTICAL_STACK`, swap axes; for `TWO_COLUMN`, place alternating units by descending source unit area in the currently less-occupied column, breaking ties by source order. `HERO_LEFT/RIGHT` (implemented) splits usable width evenly between the largest non-small image unit and a packed reading-ordered column: stacked text blocks merge (gap below half a line-height, shared edge), text rows size from `estimate_text_height` plus padding with inner/outer rhythm gaps, pills render at natural size at most, low-opacity overlays ride image units they overlap (capped independents otherwise), smalls anchor opposite the hero (plus top-center on portrait targets), and label/block orders vary. `BANNER_ZONES` (implemented) lays one band of zones in reading order with widths proportional to source unit widths and packed rows inside. `CONTROLLED_OVERLAY` starts with horizontal/vertical flow and separately reinstates candidate overlaps for source-overlapping pairs; it must retain original stacking semantics. All families run the same subsequent local geometry optimizer. These percentages/order policies are deterministic **seeding defaults** and must be tuned or rejected on evaluation; they are not claimed as inherently attractive designs.
 
 Do not encode reading order as Adobe element-array order. The source-position sort here is only a repeatable computational starting guess; later semantic role predictions may replace it if evaluated. Retain candidate designs in original Adobe array order regardless of slot assignment.
 

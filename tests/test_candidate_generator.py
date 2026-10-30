@@ -1,4 +1,4 @@
-"""Tests for the S04 candidate generator (baseline, flow/stack, hero)."""
+"""Tests for the S04 candidate generator (baseline, flow/stack, hero, zones)."""
 
 import ast
 import json
@@ -8,6 +8,11 @@ import pytest
 
 from engine.candidate_generator import (
     BAND_GAP_FRACTION,
+    BLOCK_INNER_GAP_EM,
+    BLOCK_OUTER_GAP_EM,
+    DETACHED_OVERLAY_MAX_FRACTION,
+    FAMILY_ASPECT_CUTOFF,
+    FAMILY_BANNER_ZONES,
     FAMILY_HERO_LEFT,
     FAMILY_HERO_RIGHT,
     FAMILY_HORIZONTAL_FLOW,
@@ -18,9 +23,10 @@ from engine.candidate_generator import (
     FONT_GROWTH_CAP,
     GENERATOR_VERSION,
     HERO_MAX_SINGLE_COLUMN_UNITS,
-    HERO_TWO_COLUMN_ASPECT,
     MARGIN_FRACTION,
     OVERLAY_OPACITY_THRESHOLD,
+    PORTRAIT_ASPECT_CUTOFF,
+    SAFE_BOTTOM_MARGIN_FACTOR,
     SLOT_DIRECTION_HORIZONTAL,
     SLOT_DIRECTION_VERTICAL,
     SLOT_SAFETY_FACTOR,
@@ -28,7 +34,9 @@ from engine.candidate_generator import (
     STACK_MAX_SINGLE_COLUMN_UNITS,
     Slot,
     _is_fill_member,
+    _merge_text_blocks,
     allocate_slots,
+    banner_zones_candidates,
     baseline_candidate,
     hero_left_candidates,
     hero_right_candidates,
@@ -41,6 +49,7 @@ from engine.layout_search import baseline_proposal
 from engine.layout_units import (
     GROUP_MODE_COHESIVE,
     GROUP_MODE_SPLIT,
+    build_layout_units,
     is_background_like,
     required_group_modes,
 )
@@ -59,6 +68,7 @@ FAMILIES = {
     FAMILY_VERTICAL_STACK: vertical_stack_candidates,
     FAMILY_HERO_LEFT: hero_left_candidates,
     FAMILY_HERO_RIGHT: hero_right_candidates,
+    FAMILY_BANNER_ZONES: banner_zones_candidates,
 }
 MUTABLE_GEOMETRY = {"x", "y", "width", "height"}
 
@@ -161,7 +171,8 @@ def test_allocate_slots_tiles_single_band():
     assert len(slots) == 3
     assert all(isinstance(slot, Slot) for slot in slots)
     assert (slots[0].x, slots[0].y) == pytest.approx((40.0, 20.0))
-    assert (slots[0].width, slots[0].height) == pytest.approx((920 / 3, 460.0))
+    usable_h = 500 * (1 - MARGIN_FRACTION * (1 + SAFE_BOTTOM_MARGIN_FACTOR))
+    assert (slots[0].width, slots[0].height) == pytest.approx((920 / 3, usable_h))
     for left, right in zip(slots, slots[1:]):
         assert left.x + left.width == pytest.approx(right.x)
         assert left.y == right.y and left.height == right.height
@@ -173,13 +184,12 @@ def test_allocate_slots_splits_two_bands():
     slots = allocate_slots(count, target_canvas(1600, 400),
                            direction=SLOT_DIRECTION_HORIZONTAL)
     assert len(slots) == count
-    band_h = (400 * (1 - 2 * MARGIN_FRACTION)
-              * (1 - BAND_GAP_FRACTION)) / 2
+    usable_h = 400 * (1 - MARGIN_FRACTION * (1 + SAFE_BOTTOM_MARGIN_FACTOR))
+    band_h = usable_h * (1 - BAND_GAP_FRACTION) / 2
     assert slots[0].y == pytest.approx(400 * MARGIN_FRACTION)
     assert slots[0].height == pytest.approx(band_h)
     assert slots[4].y == pytest.approx(400 * MARGIN_FRACTION + band_h
-                                       + 400 * (1 - 2 * MARGIN_FRACTION)
-                                       * BAND_GAP_FRACTION)
+                                       + usable_h * BAND_GAP_FRACTION)
     assert slots[0].width == pytest.approx(1600 * (1 - 2 * MARGIN_FRACTION) / 4)
 
 
@@ -213,13 +223,19 @@ def test_core_flow_walkthrough_positions():
     boxes = boxes_by_id(candidates[0])
     assert boxes["bg"]["x"] == 0.0 and boxes["bg"]["y"] == 0.0
     assert (boxes["bg"]["width"], boxes["bg"]["height"]) == (1600.0, 400.0)
+    usable_w = 1600 * (1 - 2 * MARGIN_FRACTION)
+    usable_h = 400 * (1 - MARGIN_FRACTION * (1 + SAFE_BOTTOM_MARGIN_FACTOR))
+    slot_w = usable_w / 4
+    band_h = usable_h * (1 - BAND_GAP_FRACTION) / 2
+    band2_top = 400 * MARGIN_FRACTION + band_h + usable_h * BAND_GAP_FRACTION
     product = boxes["product"]
-    assert (product["x"], product["y"]) == pytest.approx((1264.6, 16.0))
-    assert (product["width"], product["height"]) == pytest.approx((174.8, 174.8))
+    assert (product["x"], product["y"]) == pytest.approx(
+        (64.0 + 3 * slot_w + (slot_w - band_h) / 2, 16.0))
+    assert (product["width"], product["height"]) == pytest.approx((band_h, band_h))
     headline = boxes["headline"]
-    placed_h = 140.0 * 368.0 / 900.0
-    placed_y = 209.2 + (174.8 - placed_h) / 2
-    assert (headline["x"], headline["width"]) == pytest.approx((432.0, 368.0))
+    placed_h = 140.0 * slot_w / 900.0
+    placed_y = band2_top + (band_h - placed_h) / 2
+    assert (headline["x"], headline["width"]) == pytest.approx((432.0, slot_w))
     assert (headline["y"], headline["height"]) == pytest.approx(
         (placed_y, placed_h), abs=1e-6)
 
@@ -231,7 +247,8 @@ def test_family_slot_order_differs_by_direction():
     assert flow["logo"]["x"] == pytest.approx(800.0)
     column_w = (1472.0 - 1472.0 * 0.05) / 2
     column_x = 64.0 + column_w + 1472.0 * 0.05
-    logo_w = 320.0 * min(column_w / 320.0, 92.0 / 110.0)
+    row_h = 400 * (1 - MARGIN_FRACTION * (1 + SAFE_BOTTOM_MARGIN_FACTOR)) / 4
+    logo_w = 320.0 * min(column_w / 320.0, row_h / 110.0)
     assert stack["logo"]["x"] == pytest.approx(
         column_x + (column_w - logo_w) / 2, abs=1e-6)
     assert stack["logo"]["x"] != pytest.approx(flow["logo"]["x"])
@@ -243,7 +260,9 @@ def test_emission_preserves_canvas_ids_and_order(name, family):
     source, target = load_sample(name)
     wanted = tuple(el.id for el in source.elements)
     candidates = FAMILIES[family](source, target)
-    assert 1 <= len(candidates) <= 2
+    # Hero/zones multiply modes x orders x small-variants (at most 6 here);
+    # exact per-fixture counts are pinned in test_hero_zones_candidate_counts.
+    assert 1 <= len(candidates) <= 6
     for candidate in candidates:
         assert set(candidate.keys()) == {"canvas", "elements"}
         assert candidate["canvas"] == {"width": target.width, "height": target.height}
@@ -280,13 +299,29 @@ def test_validity_grid_all_fixtures_families_modes(name, family):
     candidates = FAMILIES[family](source, target)
     if family == FAMILY_SCALE_BASELINE:
         assert len(candidates) == 1
-    elif family in (FAMILY_HERO_LEFT, FAMILY_HERO_RIGHT):
-        assert len(candidates) in (len(modes), 2 * len(modes))
-    else:
+    elif family in (FAMILY_HORIZONTAL_FLOW, FAMILY_VERTICAL_STACK):
         assert len(candidates) == len(modes)
+    else:
+        assert len(candidates) >= len(modes)
     for candidate in candidates:
         report = validate_candidate(source, candidate, target)
         assert report.is_valid, (name, family, report.violations)
+
+
+@pytest.mark.parametrize(("name", "family", "count"), [
+    ("chameleon_sample_level1_warmup.json", FAMILY_HERO_LEFT, 3),
+    ("chameleon_sample_level1_warmup.json", FAMILY_HERO_RIGHT, 3),
+    ("chameleon_sample_level1_warmup.json", FAMILY_BANNER_ZONES, 3),
+    ("chameleon_sample_level2_core.json", FAMILY_HERO_LEFT, 4),
+    ("chameleon_sample_level2_core.json", FAMILY_HERO_RIGHT, 4),
+    ("chameleon_sample_level2_core.json", FAMILY_BANNER_ZONES, 4),
+    ("chameleon_sample_level3_advanced.json", FAMILY_HERO_LEFT, 4),
+    ("chameleon_sample_level3_advanced.json", FAMILY_HERO_RIGHT, 4),
+    ("chameleon_sample_level3_advanced.json", FAMILY_BANNER_ZONES, 4),
+])
+def test_hero_zones_candidate_counts(name, family, count):
+    source, target = load_sample(name)
+    assert len(FAMILIES[family](source, target)) == count
 
 
 @pytest.mark.parametrize("name", SAMPLES)
@@ -362,8 +397,9 @@ def test_zero_area_slots_keep_degeneracy():
     assert len(candidates) == 1
     line = boxes_by_id(candidates[0])["line"]
     assert line["width"] == 0.0
+    usable_h = 400 * (1 - MARGIN_FRACTION * (1 + SAFE_BOTTOM_MARGIN_FACTOR))
     assert (line["x"], line["y"], line["height"]) == pytest.approx(
-        (432.0, 16.0, 368.0), abs=1e-6)
+        (432.0, 16.0, usable_h), abs=1e-6)
     report = validate_candidate(source, candidates[0], target)
     assert report.is_valid, report.violations
 
@@ -588,27 +624,44 @@ def test_hero_falls_back_to_largest_unit_without_images():
 
 def test_hero_small_only_image_anchors_while_text_heroes():
     source, target = load_sample("chameleon_sample_level1_warmup.json")
-    for family in (hero_left_candidates, hero_right_candidates):
+    assert target.width / target.height < PORTRAIT_ASPECT_CUTOFF
+    for family, logo_left in ((hero_left_candidates, False),
+                              (hero_right_candidates, True)):
         candidates = family(source, target)
-        assert len(candidates) == 2
+        assert len(candidates) == 3
+        top, bottom, center = (boxes_by_id(candidate)["logo"]
+                               for candidate in candidates)
+        if logo_left:
+            assert top["x"] < 1.0 and bottom["x"] < 1.0
+        else:
+            assert top["x"] + top["width"] > target.width - 1.0
+            assert bottom["x"] + bottom["width"] > target.width - 1.0
+        assert top["y"] < 1.0
+        assert bottom["y"] + bottom["height"] > target.height - 1.0
+        assert center_x(center) == pytest.approx(target.width / 2)
+        assert center["y"] < 1.0
         placed = boxes_by_id(candidates[0])
-        assert placed["logo"]["x"] < 1.0
-        assert placed["logo"]["y"] < 1.0
-        assert center_x(placed["headline"]) < target.width / 2 \
-            if family is hero_left_candidates \
-            else center_x(placed["headline"]) > target.width / 2
+        if logo_left:
+            assert center_x(placed["headline"]) > target.width / 2
+        else:
+            assert center_x(placed["headline"]) < target.width / 2
 
 
 def test_hero_corner_variants_top_and_bottom():
     source, target = load_sample("chameleon_sample_level2_core.json")
-    for family in (hero_left_candidates, hero_right_candidates):
+    for family, logo_left in ((hero_left_candidates, False),
+                              (hero_right_candidates, True)):
         candidates = family(source, target)
-        assert len(candidates) == 2
+        assert len(candidates) == 4
         logos = [boxes_by_id(candidate)["logo"] for candidate in candidates]
-        assert all(logo["x"] < 1.0 for logo in logos)
+        if logo_left:
+            assert all(logo["x"] < 1.0 for logo in logos)
+        else:
+            assert all(logo["x"] + logo["width"] > target.width - 1.0
+                       for logo in logos)
         tops = sorted(logo["y"] for logo in logos)
-        assert tops[0] < 1.0
-        assert 299.0 < tops[1] < 300.0
+        assert tops[0] < 1.0 and tops[1] < 1.0
+        assert all(299.0 < top < 300.0 for top in tops[2:])
 
 
 def test_hero_small_stays_small_and_keeps_ratio():
@@ -621,19 +674,34 @@ def test_hero_small_stays_small_and_keeps_ratio():
             assert logo["width"] / logo["height"] == pytest.approx(320 / 110, rel=1e-9)
 
 
-def test_overlay_attaches_to_max_iou_unit_with_uniform_offsets():
+def boxes_overlap(first, second):
+    return (min(first["x"] + first["width"], second["x"] + second["width"])
+            > max(first["x"], second["x"])
+            and min(first["y"] + first["height"], second["y"] + second["height"])
+            > max(first["y"], second["y"]))
+
+
+TEXT_AND_PILL_IDS = ("headline", "subhead", "badge_bg", "badge_label",
+                     "cta_bg", "cta_label")
+
+
+def test_overlay_rides_only_image_unit_with_uniform_offsets():
     source, target = load_sample("chameleon_sample_level2_core.json")
     placed = boxes_by_id(hero_left_candidates(source, target)[0])
-    deco, badge = placed["deco_circle_1"], placed["badge_bg"]
-    assert deco["y"] <= badge["y"] <= deco["y"] + deco["height"]
-    assert center_x(badge) - center_x(deco) == pytest.approx(0.0, abs=1e-6)
-    assert center_y(badge) - center_y(deco) == pytest.approx(
-        -82 * deco["height"] / 500, abs=1e-6)
-    assert placed["product"]["x"] + placed["product"]["width"] < deco["x"]
-    headline, wash = placed["headline"], placed["deco_circle_2"]
-    assert center_y(headline) - center_y(wash) == pytest.approx(0.0, abs=1e-6)
-    assert center_x(headline) - center_x(wash) == pytest.approx(
-        -310 * wash["width"] / 300, abs=1e-6)
+    product, deco = placed["product"], placed["deco_circle_1"]
+    scale = product["width"] / 500
+    assert center_x(deco) - center_x(product) == pytest.approx(
+        -390 * scale, abs=1e-6)
+    assert center_y(deco) - center_y(product) == pytest.approx(
+        -360 * scale, abs=1e-6)
+    assert boxes_overlap(product, deco)
+    for other_id in TEXT_AND_PILL_IDS:
+        assert not boxes_overlap(deco, placed[other_id]), other_id
+    wash = placed["deco_circle_2"]
+    cap = DETACHED_OVERLAY_MAX_FRACTION * min(target.width, target.height)
+    assert max(wash["width"], wash["height"]) <= cap + 1.0
+    for other_id in TEXT_AND_PILL_IDS:
+        assert not boxes_overlap(wash, placed[other_id]), other_id
 
 
 def test_overlay_without_target_stays_independent_and_wash_fills():
@@ -709,11 +777,11 @@ def test_hero_column_count_follows_aspect():
     source = design(1000, 1000, elements)
     assert required_group_modes(source) == (GROUP_MODE_COHESIVE,)
     wide = target_canvas(1000, 400)
-    assert wide.width / wide.height >= HERO_TWO_COLUMN_ASPECT
+    assert wide.width / wide.height >= FAMILY_ASPECT_CUTOFF
     placed = boxes_by_id(hero_left_candidates(source, wide)[0])
     assert len({placed[f"t{pos}"]["x"] for pos in range(1, 6)}) == 1
     narrow = target_canvas(400, 1000)
-    assert narrow.width / narrow.height < HERO_TWO_COLUMN_ASPECT
+    assert narrow.width / narrow.height < FAMILY_ASPECT_CUTOFF
     assert 5 > HERO_MAX_SINGLE_COLUMN_UNITS
     placed = boxes_by_id(hero_left_candidates(source, narrow)[0])
     left_x = [placed[f"t{pos}"]["x"] for pos in (1, 2, 3)]
@@ -723,10 +791,113 @@ def test_hero_column_count_follows_aspect():
     assert left_x[0] < right_x[0]
 
 
-def test_hero_rows_proportional_to_unit_heights():
+def test_hero_column_packs_estimate_sized_rows():
     source, target = load_sample("chameleon_sample_level2_core.json")
     placed = boxes_by_id(hero_left_candidates(source, target)[0])
-    assert placed["deco_circle_1"]["height"] / placed["deco_circle_2"]["height"] == \
-        pytest.approx(500 / 300, rel=1e-6)
-    assert placed["subhead"]["height"] / placed["cta_bg"]["height"] == \
-        pytest.approx(70 / 90, rel=1e-6)
+    usable_w = 1600 * (1 - 2 * MARGIN_FRACTION)
+    side_w = (usable_w - usable_w * 0.05) / 2
+    column_x = 64.0 + side_w + usable_w * 0.05
+    headline, subhead = placed["headline"], placed["subhead"]
+    assert (headline["x"], headline["width"]) == pytest.approx((column_x, side_w))
+    assert (subhead["x"], subhead["width"]) == pytest.approx((column_x, side_w))
+    inner = subhead["y"] - (headline["y"] + headline["height"])
+    outer = placed["cta_bg"]["y"] - (subhead["y"] + subhead["height"])
+    assert 0 < inner < outer
+    assert placed["badge_bg"]["width"] <= 220.0 + 1.0
+    usable_bottom = 400 * (1 - MARGIN_FRACTION * SAFE_BOTTOM_MARGIN_FACTOR)
+    assert placed["cta_bg"]["y"] + placed["cta_bg"]["height"] < usable_bottom
+
+
+def test_text_blocks_merge_stacked_aligned_pairs_only():
+    source = design(1000, 1000, [
+        text("a", 0, 0, 200, 60, content="a", font_size=16),
+        text("b", 0, 60, 200, 60, content="b", font_size=16),
+        text("far", 0, 500, 200, 60, content="c", font_size=16),
+        shape("pill_bg", 0, 300, 100, 100, group_id="p"),
+        text("pill_label", 0, 305, 100, 40, content="d", font_size=14,
+             group_id="p"),
+    ])
+    units, block_keys = _merge_text_blocks(
+        list(build_layout_units(source, group_mode=GROUP_MODE_COHESIVE)),
+        source.source_canvas)
+    assert len(block_keys) == 1
+    assert sorted(next(iter(block_keys))) == [0, 1]
+    assert len(units) == 3
+
+
+def test_packed_block_uses_inner_gap_between_members():
+    source = design(1000, 1000, [
+        text("a", 0, 0, 200, 60, content="w", font_size=16),
+        text("b", 0, 60, 200, 60, content="w", font_size=16),
+        text("c", 0, 500, 200, 60, content="w", font_size=16),
+        image("hero", 0, 700, 400, 200),
+    ])
+    target = target_canvas(1000, 1000)
+    placed = boxes_by_id(hero_left_candidates(source, target)[0])
+    inner = placed["b"]["y"] - (placed["a"]["y"] + placed["a"]["height"])
+    outer = placed["c"]["y"] - (placed["b"]["y"] + placed["b"]["height"])
+    assert inner / outer == pytest.approx(BLOCK_INNER_GAP_EM / BLOCK_OUTER_GAP_EM)
+
+
+def test_third_small_overflows_into_column():
+    source = design(1000, 1000, [
+        image("big", 0, 0, 500, 500),
+        image("s1", 0, 600, 100, 100),
+        image("s2", 200, 600, 100, 100),
+        image("s3", 400, 600, 100, 100),
+    ])
+    target = target_canvas(1000, 1000)
+    placed = boxes_by_id(hero_left_candidates(source, target)[0])
+    corners = [placed["s1"], placed["s2"]]
+    assert all(box["y"] < 1.0 for box in corners)
+    assert {box["x"] < 1.0 for box in corners} == {True, False}
+    third = placed["s3"]
+    assert 1.0 < third["x"] and third["x"] + third["width"] < 999.0
+
+
+def test_label_block_swap_varies_core_column_order():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    candidates = hero_left_candidates(source, target)
+    assert len(candidates) == 4
+    base = boxes_by_id(candidates[0])
+    assert base["headline"]["y"] < base["cta_bg"]["y"]
+    swapped = boxes_by_id(candidates[2])
+    assert swapped["cta_bg"]["y"] < swapped["headline"]["y"]
+    assert candidates[0] != candidates[2]
+
+
+def test_label_block_swaps_vary_l3_column_order():
+    source, target = load_sample("chameleon_sample_level3_advanced.json")
+    candidates = hero_left_candidates(source, target)
+    assert len(candidates) == 4
+    base = boxes_by_id(candidates[0])
+    assert base["ribbon_bg"]["y"] < base["headline"]["y"] < base["badge1_bg"]["y"]
+    swapped = boxes_by_id(candidates[2])
+    assert swapped["headline"]["y"] < swapped["ribbon_bg"]["y"]
+    assert candidates[0] != candidates[2]
+
+
+def test_banner_zones_order_and_differ_from_hero():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    zones = banner_zones_candidates(source, target)
+    assert len(zones) == 4
+    placed = boxes_by_id(zones[0])
+    assert (center_x(placed["badge_bg"]) < center_x(placed["product"])
+            < center_x(placed["deco_circle_2"]) < center_x(placed["headline"])
+            < center_x(placed["cta_bg"]))
+    hero = boxes_by_id(hero_left_candidates(source, target)[0])
+    assert zones[0] != hero
+
+
+def test_overlay_without_image_target_stays_capped_and_disjoint():
+    source = design(1000, 1000, [
+        text("t", 100, 100, 400, 100, content="hello", font_size=20),
+        shape("wash", 150, 120, 400, 400, opacity=0.2),
+        image("photo", 600, 600, 300, 300),
+    ])
+    target = target_canvas(1000, 1000)
+    placed = boxes_by_id(hero_left_candidates(source, target)[0])
+    wash = placed["wash"]
+    cap = DETACHED_OVERLAY_MAX_FRACTION * min(target.width, target.height)
+    assert max(wash["width"], wash["height"]) <= cap + 1.0
+    assert not boxes_overlap(wash, placed["t"])

@@ -20,6 +20,7 @@ import pytest
 
 from engine import candidate_validator, layout_edits
 from engine.candidate_generator import (
+    banner_zones_candidates,
     horizontal_flow_candidates,
     vertical_stack_candidates,
 )
@@ -214,7 +215,16 @@ def stack_candidates(source, target):
     return [(mode, candidate, True) for mode, candidate in zip(modes, candidates)]
 
 
-FAMILIES = {"baseline": baseline_candidates,
+def zones_candidates(source, target):
+    # (label, candidate, must_be_fully_valid): modes x orders x small-variants.
+    candidates = banner_zones_candidates(source, target)
+    assert candidates
+    return [(f"zones{n}", candidate, True)
+            for n, candidate in enumerate(candidates)]
+
+
+FAMILIES = {"banner_zones": zones_candidates,
+            "baseline": baseline_candidates,
             "horizontal_flow": flow_candidates,
             "vertical_stack": stack_candidates}
 
