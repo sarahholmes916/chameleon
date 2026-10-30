@@ -22,6 +22,7 @@ from engine.candidate_generator import (
     FLOW_MAX_SINGLE_BAND_UNITS,
     FONT_GROWTH_CAP,
     GENERATOR_VERSION,
+    HERO_FLOOR_FRACTION,
     HERO_MAX_SINGLE_COLUMN_UNITS,
     MARGIN_FRACTION,
     OVERLAY_OPACITY_THRESHOLD,
@@ -312,8 +313,8 @@ def test_validity_grid_all_fixtures_families_modes(name, family):
     ("chameleon_sample_level1_warmup.json", FAMILY_HERO_LEFT, 3),
     ("chameleon_sample_level1_warmup.json", FAMILY_HERO_RIGHT, 3),
     ("chameleon_sample_level1_warmup.json", FAMILY_BANNER_ZONES, 3),
-    ("chameleon_sample_level2_core.json", FAMILY_HERO_LEFT, 4),
-    ("chameleon_sample_level2_core.json", FAMILY_HERO_RIGHT, 4),
+    ("chameleon_sample_level2_core.json", FAMILY_HERO_LEFT, 6),
+    ("chameleon_sample_level2_core.json", FAMILY_HERO_RIGHT, 6),
     ("chameleon_sample_level2_core.json", FAMILY_BANNER_ZONES, 4),
     ("chameleon_sample_level3_advanced.json", FAMILY_HERO_LEFT, 4),
     ("chameleon_sample_level3_advanced.json", FAMILY_HERO_RIGHT, 4),
@@ -597,10 +598,13 @@ def test_hero_picks_largest_image_and_mirrors():
     assert left["product"]["height"] == pytest.approx(right["product"]["height"])
     assert center_x(left["product"]) + center_x(right["product"]) == pytest.approx(
         target.width, abs=1e-6)
+    # The headline's column block-mate is subhead (merged stacked unit);
+    # deco_circle_2 is a product rider now, not a column member, and keeps
+    # its source offset direction in both variants (no mirror).
     for placed in (left, right):
-        union_left = min(placed["headline"]["x"], placed["deco_circle_2"]["x"])
+        union_left = min(placed["headline"]["x"], placed["subhead"]["x"])
         union_right = max(placed["headline"]["x"] + placed["headline"]["width"],
-                          placed["deco_circle_2"]["x"] + placed["deco_circle_2"]["width"])
+                          placed["subhead"]["x"] + placed["subhead"]["width"])
         placed["headline_unit_cx"] = (union_left + union_right) / 2
     assert left["headline_unit_cx"] + right["headline_unit_cx"] == pytest.approx(
         target.width, abs=1e-6)
@@ -652,7 +656,7 @@ def test_hero_corner_variants_top_and_bottom():
     for family, logo_left in ((hero_left_candidates, False),
                               (hero_right_candidates, True)):
         candidates = family(source, target)
-        assert len(candidates) == 4
+        assert len(candidates) == 6
         logos = [boxes_by_id(candidate)["logo"] for candidate in candidates]
         if logo_left:
             assert all(logo["x"] < 1.0 for logo in logos)
@@ -660,8 +664,8 @@ def test_hero_corner_variants_top_and_bottom():
             assert all(logo["x"] + logo["width"] > target.width - 1.0
                        for logo in logos)
         tops = sorted(logo["y"] for logo in logos)
-        assert tops[0] < 1.0 and tops[1] < 1.0
-        assert all(299.0 < top < 300.0 for top in tops[2:])
+        assert all(top < 1.0 for top in tops[:3])
+        assert all(299.0 < top < 300.0 for top in tops[3:])
 
 
 def test_hero_small_stays_small_and_keeps_ratio():
@@ -685,23 +689,29 @@ TEXT_AND_PILL_IDS = ("headline", "subhead", "badge_bg", "badge_label",
                      "cta_bg", "cta_label")
 
 
-def test_overlay_rides_only_image_unit_with_uniform_offsets():
+def test_overlay_rides_only_image_unit_with_capped_size():
     source, target = load_sample("chameleon_sample_level2_core.json")
     placed = boxes_by_id(hero_left_candidates(source, target)[0])
-    product, deco = placed["product"], placed["deco_circle_1"]
+    product = placed["product"]
+    assert min(product["width"], product["height"]) >= HERO_FLOOR_FRACTION * min(
+        target.width, target.height)
     scale = product["width"] / 500
-    assert center_x(deco) - center_x(product) == pytest.approx(
-        -390 * scale, abs=1e-6)
-    assert center_y(deco) - center_y(product) == pytest.approx(
-        -360 * scale, abs=1e-6)
+    deco = placed["deco_circle_1"]
     assert boxes_overlap(product, deco)
-    for other_id in TEXT_AND_PILL_IDS:
-        assert not boxes_overlap(deco, placed[other_id]), other_id
+    assert center_x(deco) < center_x(product)
+    assert center_y(deco) < center_y(product)
+    assert max(deco["width"], deco["height"]) <= 500 * scale + 1.0
     wash = placed["deco_circle_2"]
-    cap = DETACHED_OVERLAY_MAX_FRACTION * min(target.width, target.height)
-    assert max(wash["width"], wash["height"]) <= cap + 1.0
-    for other_id in TEXT_AND_PILL_IDS:
-        assert not boxes_overlap(wash, placed[other_id]), other_id
+    assert center_x(wash) - center_x(product) == pytest.approx(
+        310 * scale, abs=1e-6)
+    assert boxes_overlap(product, wash)
+    for rider in (deco, wash):
+        assert 0.0 <= rider["x"]
+        assert 0.0 <= rider["y"]
+        assert rider["x"] + rider["width"] <= target.width
+        assert rider["y"] + rider["height"] <= target.height
+        for other_id in TEXT_AND_PILL_IDS:
+            assert not boxes_overlap(rider, placed[other_id]), other_id
 
 
 def test_overlay_without_target_stays_independent_and_wash_fills():
@@ -858,12 +868,23 @@ def test_third_small_overflows_into_column():
 def test_label_block_swap_varies_core_column_order():
     source, target = load_sample("chameleon_sample_level2_core.json")
     candidates = hero_left_candidates(source, target)
-    assert len(candidates) == 4
+    assert len(candidates) == 6
     base = boxes_by_id(candidates[0])
     assert base["headline"]["y"] < base["cta_bg"]["y"]
-    swapped = boxes_by_id(candidates[2])
-    assert swapped["cta_bg"]["y"] < swapped["headline"]["y"]
-    assert candidates[0] != candidates[2]
+    first_swap = boxes_by_id(candidates[2])
+    assert first_swap["headline"]["y"] < first_swap["badge_bg"]["y"]
+    second_swap = boxes_by_id(candidates[4])
+    assert second_swap["cta_bg"]["y"] < second_swap["headline"]["y"]
+    assert candidates[0] != candidates[2] != candidates[4]
+
+
+def test_hero_floor_holds_on_core_in_hero_and_zones():
+    source, target = load_sample("chameleon_sample_level2_core.json")
+    floor = HERO_FLOOR_FRACTION * min(target.width, target.height)
+    hero = boxes_by_id(hero_left_candidates(source, target)[0])["product"]
+    assert min(hero["width"], hero["height"]) >= floor
+    zones = boxes_by_id(banner_zones_candidates(source, target)[0])["product"]
+    assert min(zones["width"], zones["height"]) >= floor
 
 
 def test_label_block_swaps_vary_l3_column_order():
@@ -883,8 +904,11 @@ def test_banner_zones_order_and_differ_from_hero():
     assert len(zones) == 4
     placed = boxes_by_id(zones[0])
     assert (center_x(placed["badge_bg"]) < center_x(placed["product"])
-            < center_x(placed["deco_circle_2"]) < center_x(placed["headline"])
-            < center_x(placed["cta_bg"]))
+            < center_x(placed["headline"]) < center_x(placed["cta_bg"]))
+    for rider_id in ("deco_circle_1", "deco_circle_2"):
+        for other_id in TEXT_AND_PILL_IDS:
+            assert not boxes_overlap(placed[rider_id], placed[other_id]), (
+                rider_id, other_id)
     hero = boxes_by_id(hero_left_candidates(source, target)[0])
     assert zones[0] != hero
 

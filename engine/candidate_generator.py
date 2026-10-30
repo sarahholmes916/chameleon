@@ -80,12 +80,13 @@ __all__ = [
     "FONT_GROWTH_STEPS",
     "FONT_SHRINK_STEP",
     "GENERATOR_VERSION",
+    "HERO_FLOOR_FRACTION",
     "HERO_MAX_SINGLE_COLUMN_UNITS",
     "HERO_SIDE_FRACTION",
     "MARGIN_FRACTION",
     "MAX_PACK_PASSES",
+    "MAX_RIDER_FIT_PASSES",
     "MIN_UNIT_SCALE",
-    "OVERLAY_ATTACH_IOU_THRESHOLD",
     "OVERLAY_OPACITY_THRESHOLD",
     "PILL_ASPECT_TOLERANCE",
     "PORTRAIT_ASPECT_CUTOFF",
@@ -183,6 +184,9 @@ DETACHED_OVERLAY_MAX_FRACTION = 0.25
 # Layout/room refinement passes for packed stacks (initial plus refinements);
 # bounded and deterministic, the grid verifies every emission.
 MAX_PACK_PASSES = 3
+# Center-clamp/size refinement passes when fitting one rider (fixtures settle
+# in at most three; bounded and deterministic regardless).
+MAX_RIDER_FIT_PASSES = 8
 # Image-bearing units below this fraction of the source canvas area anchor
 # to corners instead of taking column rows (generic smallness separating
 # logos and badges from content images).
@@ -193,10 +197,11 @@ SMALL_ANCHOR_MAX_FRACTION = 0.25
 # Shapes below this opacity are decorative overlays riding their overlapped
 # unit; the midpoint separates washes from solids.
 OVERLAY_OPACITY_THRESHOLD = 0.5
-# An overlay attaches to the max-IoU non-fill unit when the unit-box IoU
-# exceeds this (any genuine area overlap qualifies; edge grazes with no
-# shared area stay below it).
-OVERLAY_ATTACH_IOU_THRESHOLD = 0.02
+# A hero unit's smaller placed side spans at least this fraction of the
+# target's shorter side wherever slot-fit reaches it (dominance floor for
+# heroes; narrow fallback heroes whose slot cannot reach it are exempt).
+# The floor holds because riders cap themselves instead of shrinking targets.
+HERO_FLOOR_FRACTION = 0.6
 # Two pill units read as near-identical when their relative aspect differs
 # by at most this (same-component tolerance, not a fixture fit).
 PILL_ASPECT_TOLERANCE = 0.10
@@ -742,11 +747,11 @@ def _is_fill_unit(unit: LayoutUnit, canvas: Canvas) -> bool:
 
 
 def _overlay_evidence(overlay: LayoutUnit, candidate: LayoutUnit) -> bool:
-    """Containment either way, or genuine unit-box area overlap."""
+    """Containment either way, or any positive unit-box area overlap."""
     if any(contains_any(outer, inner)
            for outer in overlay.members for inner in candidate.members):
         return True
-    return box_iou(overlay.bbox, candidate.bbox) > OVERLAY_ATTACH_IOU_THRESHOLD
+    return box_iou(overlay.bbox, candidate.bbox) > 0
 
 
 def _attach_overlays(units: list[LayoutUnit], canvas: Canvas
@@ -790,35 +795,104 @@ def _placed_unit_center(unit: LayoutUnit,
     return (left + right) / 2, (top + bottom) / 2
 
 
-def _rider_room(overlay: LayoutUnit, unit: LayoutUnit,
-                placed_x: float, placed_y: float, target: Canvas) -> float | None:
-    """Largest rider scale about the unit's placed center staying in-canvas.
+def _rider_half_extents(overlay: LayoutUnit) -> tuple[float, float]:
+    """Max rotated member extents about the overlay unit's center."""
+    box_x, box_y, box_w, box_h = (float(value) for value in overlay.bbox)
+    middle_x = box_x + box_w / 2
+    middle_y = box_y + box_h / 2
+    half_x = 0.0
+    half_y = 0.0
+    for member in overlay.members:
+        width = float(member.width)
+        height = float(member.height)
+        cosine, sine, pad = _rotation_terms(member)
+        reach_x = cosine * width / 2 + sine * height / 2 + pad
+        reach_y = sine * width / 2 + cosine * height / 2 + pad
+        half_x = max(half_x, abs(float(member.x) + width / 2 - middle_x) + reach_x)
+        half_y = max(half_y, abs(float(member.y) + height / 2 - middle_y) + reach_y)
+    return half_x, half_y
 
-    The anchor is the unit center (which maps to the fixed slot/row center),
-    so the bound stays valid when the target rescales; member corners would
-    drift under recentering.
+
+def _fit_rider(overlay: LayoutUnit, hint_x: float, hint_y: float,
+               target_scale: float,
+               avoid: list[tuple[float, float, float, float]],
+               target: Canvas) -> tuple[float, float, float]:
+    """Rider center and scale: mapped offset, clamped, clearing content.
+
+    The rider keeps its source center-offset scaled by the target's own
+    scale; the center clamps minimally into the canvas and the size caps so
+    the rotated bounds stay in-canvas (dust-proof margins) and disjoint from
+    every avoided box. Bounded refinement, deterministic; a center trapped
+    inside an avoided box degrades to a minimal valid mark.
     """
-    box_x, box_y, box_w, box_h = unit.bbox
-    specs = _member_specs_origin(
-        overlay, float(box_x) + float(box_w) / 2, float(box_y) + float(box_h) / 2)
-    return _max_fit_scale(specs, placed_x, placed_y,
-                          float(target.width), float(target.height))
+    half_x, half_y = _rider_half_extents(overlay)
+    canvas_w = float(target.width)
+    canvas_h = float(target.height)
+    if half_x <= 0 and half_y <= 0:
+        return (min(max(hint_x, 0.0), canvas_w),
+                min(max(hint_y, 0.0), canvas_h), target_scale)
+    margin_w = canvas_w * (1 - SLOT_SAFETY_FACTOR)
+    margin_h = canvas_h * (1 - SLOT_SAFETY_FACTOR)
+    scale = target_scale
+    center_x, center_y = hint_x, hint_y
+    for _ in range(MAX_RIDER_FIT_PASSES):
+        low_x = half_x * scale + margin_w
+        high_x = canvas_w - half_x * scale - margin_w
+        low_y = half_y * scale + margin_h
+        high_y = canvas_h - half_y * scale - margin_h
+        if low_x > high_x or low_y > high_y:
+            fits = [scale]
+            if half_x > 0:
+                fits.append((canvas_w - 2 * margin_w) / (2 * half_x))
+            if half_y > 0:
+                fits.append((canvas_h - 2 * margin_h) / (2 * half_y))
+            scale = min(fits)
+            if scale <= 0:
+                break
+            continue
+        center_x = min(max(hint_x, low_x), high_x)
+        center_y = min(max(hint_y, low_y), high_y)
+        bound = scale
+        for left, top, width, height in avoid:
+            if half_x > 0:
+                axis_x = (abs(center_x - (left + width / 2)) - width / 2) / half_x
+            else:
+                axis_x = math.inf if abs(center_x - (left + width / 2)) >= width / 2 else -math.inf
+            if half_y > 0:
+                axis_y = (abs(center_y - (top + height / 2)) - height / 2) / half_y
+            else:
+                axis_y = math.inf if abs(center_y - (top + height / 2)) >= height / 2 else -math.inf
+            bound = min(bound, max(axis_x, axis_y))
+        if bound >= scale:
+            break
+        scale = bound
+        if scale <= 0:
+            break
+    if scale <= 0:
+        scale = MIN_UNIT_SCALE
+        center_x = min(max(hint_x, margin_w), canvas_w - margin_w)
+        center_y = min(max(hint_y, margin_h), canvas_h - margin_h)
+    return center_x, center_y, scale * SLOT_SAFETY_FACTOR
 
 
-def _place_rider(overlay: LayoutUnit, unit: LayoutUnit,
-                 placed_x: float, placed_y: float,
+def _place_rider(overlay: LayoutUnit, center_x: float, center_y: float,
                  scale: float) -> dict[str, tuple[float, float, float, float]]:
-    """Rider boxes under the target unit's uniform transform (offsets kept)."""
-    box_x, box_y, box_w, box_h = (float(value) for value in unit.bbox)
-    origin_x = box_x + box_w / 2
-    origin_y = box_y + box_h / 2
-    rider_x, rider_y, rider_w, rider_h = (float(value) for value in overlay.bbox)
+    """Rider member boxes centered uniformly (ratios exact)."""
+    box_x, box_y, box_w, box_h = (float(value) for value in overlay.bbox)
+    middle_x = box_x + box_w / 2
+    middle_y = box_y + box_h / 2
     boxes = {}
-    for element, (fx, fy, fw, fh) in zip(overlay.members, overlay.relative_geometry):
+    for element in overlay.members:
+        width = float(element.width)
+        height = float(element.height)
+        member_x = float(element.x) + width / 2
+        member_y = float(element.y) + height / 2
+        placed_w = width * scale
+        placed_h = height * scale
         boxes[element.id] = (
-            placed_x + (rider_x + fx * rider_w - origin_x) * scale,
-            placed_y + (rider_y + fy * rider_h - origin_y) * scale,
-            fw * rider_w * scale, fh * rider_h * scale)
+            center_x + (member_x - middle_x) * scale - placed_w / 2,
+            center_y + (member_y - middle_y) * scale - placed_h / 2,
+            placed_w, placed_h)
     return boxes
 
 
@@ -1208,9 +1282,11 @@ def _run_pack_passes(
     """Bounded layout/room loop; returns (boxes, scales, fonts).
 
     Each pass decides fonts in provisional tall boxes, lays out packed rows
-    with clamping, places fits/anchors/fills, and caps rider-bound and
-    rotation-bound targets; the loop stops early when caps stabilize. Final
-    fonts are decided in the final boxes.
+    with clamping, places fits/anchors/fills, and caps rotation-bound rows;
+    the loop stops early when caps stabilize. Riders never shrink targets:
+    after the final layout each rider keeps its scaled center-offset with its
+    own size capped to stay in-canvas and clear of text and pill boxes.
+    Final fonts are decided in the final boxes.
     """
     canvas_w = float(target.width)
     canvas_h = float(target.height)
@@ -1323,29 +1399,32 @@ def _run_pack_passes(
                 cap = room * SLOT_SAFETY_FACTOR
             key = id(row.unit)
             new_caps[key] = min(new_caps.get(key, math.inf), cap)
-        for overlay, overlay_target in riders:
-            center_x, center_y = _placed_unit_center(overlay_target, boxes)
-            room = _rider_room(overlay, overlay_target, center_x, center_y, target)
-            if room is None or room <= 0:
-                cap = MIN_UNIT_SCALE
-            else:
-                cap = room * SLOT_SAFETY_FACTOR
-            key = id(overlay_target)
-            new_caps[key] = min(new_caps.get(key, math.inf), cap)
         if new_caps == caps:
             break
         caps = new_caps
-    rider_target_scale: dict[int, float] = {}
-    for _, overlay_target in riders:
-        key = id(overlay_target)
-        if key not in rider_target_scale:
-            rider_target_scale[key] = scales[overlay_target.members[0].id]
+    fill_ids = {member.id for unit in fill_units for member in unit.members}
+    avoid_ids = {element.id for element in source.elements
+                 if element.type == "text"} - fill_ids
+    for rows, _ in pack_jobs:
+        for row in rows:
+            if _is_pill_unit(row.unit):
+                avoid_ids.update(member.id for member in row.unit.members)
+    for unit, _, _ in fit_jobs:
+        if _is_pill_unit(unit):
+            avoid_ids.update(member.id for member in unit.members)
     for overlay, overlay_target in riders:
-        center_x, center_y = _placed_unit_center(overlay_target, boxes)
-        scale = rider_target_scale[id(overlay_target)]
-        boxes.update(_place_rider(overlay, overlay_target, center_x, center_y, scale))
+        target_x, target_y = _placed_unit_center(overlay_target, boxes)
+        scale = scales[overlay_target.members[0].id]
+        unit_x, unit_y, unit_w, unit_h = (float(value) for value in overlay_target.bbox)
+        rider_x, rider_y, rider_w, rider_h = (float(value) for value in overlay.bbox)
+        hint_x = target_x + ((rider_x + rider_w / 2) - (unit_x + unit_w / 2)) * scale
+        hint_y = target_y + ((rider_y + rider_h / 2) - (unit_y + unit_h / 2)) * scale
+        avoid = [boxes[element_id] for element_id in sorted(avoid_ids)]
+        center_x, center_y, rider_scale = _fit_rider(
+            overlay, hint_x, hint_y, scale, avoid, target)
+        boxes.update(_place_rider(overlay, center_x, center_y, rider_scale))
         for element in overlay.members:
-            scales[element.id] = scale
+            scales[element.id] = rider_scale
     fonts = _decide_font_sizes(source, boxes, scales)
     return boxes, scales, fonts
 
@@ -1411,6 +1490,8 @@ def _hero_candidates(source: Design, target: Canvas, *,
         hero_slot, column_slot = _hero_rects(
             target, mirror=mirror, has_hero=has_hero)
         canvas_slot = Slot(0.0, 0.0, target_w, target_h)
+        # The hero takes full slot-fit: riders cap themselves instead of
+        # shrinking it, which is what keeps HERO_FLOOR_FRACTION attainable.
         fit_jobs = ([(hero, hero_slot, math.inf)]
                     if hero is not None and hero_slot is not None else [])
         fit_jobs += [(unit, canvas_slot, math.inf) for unit in fits]
