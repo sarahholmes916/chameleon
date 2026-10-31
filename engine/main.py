@@ -34,6 +34,12 @@ REQUIRED_BY_TYPE = {
 }
 
 
+# Exit code when no task produced output: every task failed, or there were
+# no tasks at all. Any batch with at least one success exits 0 so a single
+# hard design never discards the other outputs.
+NO_SUCCESS_EXIT_CODE = 1
+
+
 def self_check(source: dict, output: dict) -> list[str]:
     """Quick, non-authoritative sanity check so obvious mistakes are caught
     locally before you submit. This is NOT the official scorer — see
@@ -110,15 +116,21 @@ def main() -> int:
     task_files = sorted(INPUT_DIR.glob("*.json"))
     if not task_files:
         print(f"No task files found in {INPUT_DIR}", file=sys.stderr)
-        return 1
+        return NO_SUCCESS_EXIT_CODE
 
-    exit_code = 0
+    succeeded = 0
+    failed: list[str] = []
     for task_path in task_files:
         task = json.loads(task_path.read_text())
         source, target_canvas = task["source"], task["target_canvas"]
 
         t0 = time.time()
-        output = resize(source, target_canvas)
+        try:
+            output = resize(source, target_canvas)
+        except Exception as exc:
+            print(f"[{task_path.name}] FAILED: {type(exc).__name__}: {exc}")
+            failed.append(task_path.name)
+            continue
         elapsed = time.time() - t0
 
         problems = self_check(source, output)
@@ -131,8 +143,16 @@ def main() -> int:
               f"-> {stem}_output.json, {stem}_output.png")
         for p in problems:
             print(f"    - {p}")
+        succeeded += 1
 
-    return exit_code
+    summary = f"Summary: {succeeded} ok, {len(failed)} failed"
+    if failed:
+        summary += f" [failed: {', '.join(failed)}]"
+    print(summary)
+
+    if succeeded > 0:
+        return 0
+    return NO_SUCCESS_EXIT_CODE
 
 
 if __name__ == "__main__":
