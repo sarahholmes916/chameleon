@@ -16,8 +16,9 @@ SUITES = {
              "tests/test_layout_edits.py", "tests/test_layout_units.py",
              "tests/test_layout_objective.py", "tests/test_candidate_generator.py",
              "tests/test_resize.py", "tests/test_candidate_pool.py", "tests/test_shape_stretch.py",
-             "tests/test_layout_refinement.py"),
-    "ml": ("tests/test_graph_features.py", "tests/test_ranker.py", "tests/test_shape_stretch_graph.py"),
+             "tests/test_layout_refinement.py", "tests/test_learned_selection.py"),
+    "ml": ("tests/test_graph_features.py", "tests/test_ranker.py", "tests/test_shape_stretch_graph.py",
+           "tests/test_training.py", "tests/test_blind_eval.py", "tests/test_learned_selection_ml.py"),
     "sources": ("tests/test_source_designs.py", "tests/test_annotation.py", "tests/test_s04_rendering.py", "tests/test_rankings.py"),
 }
 CPU_ALLOWED_SKIPS = {

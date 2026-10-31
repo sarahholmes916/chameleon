@@ -1,2 +1,5 @@
 Pillow>=10.0
+# Learned candidate choice (engine/learned_selection.py). Torch itself is installed from the CPU index in the Dockerfile;
+# the engine falls back to the deterministic objective if either package is missing.
+torch-geometric==2.8.1
 git+https://github.com/CyberAgentAILab/cr-renderer

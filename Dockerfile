@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
+# CPU-only PyTorch (the default PyPI wheel is the large CUDA build). Version and PyG pin match docs/CI.md and
+# the shipped checkpoint, which refuses to load under a different PyG. Installed at build time only.
+RUN pip install --no-cache-dir torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

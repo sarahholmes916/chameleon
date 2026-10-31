@@ -12,9 +12,9 @@ and newer runs cancel outdated runs for the same PR/ref.
 
 | Stable check name | Environment | Required suites |
 | --- | --- | --- |
-| `Core / Python 3.10` | Ubuntu, Python 3.10, pytest and Ruff | S02, output validation/repair, allowlisted generator edits and property tests, S04 shape roles/stretching and local refinement (`tests/test_shape_stretch.py`, `tests/test_layout_refinement.py`), and CI-guard tests |
+| `Core / Python 3.10` | Ubuntu, Python 3.10, pytest and Ruff | S02, output validation/repair, allowlisted generator edits and property tests, S04 shape roles/stretching and local refinement (`tests/test_shape_stretch.py`, `tests/test_layout_refinement.py`), the torch-free learned-selection seam (`tests/test_learned_selection.py`), and CI-guard tests |
 | `Core / Python 3.11` | Ubuntu, Python 3.11, pytest and Ruff | S02, output validation/repair, allowlisted generator edits and property tests, S04 shape roles/stretching and local refinement (`tests/test_shape_stretch.py`, `tests/test_layout_refinement.py`), and CI-guard tests |
-| `Graph and ML / CPU` | Ubuntu, Python 3.11, CPU Torch 2.11.0, PyG 2.8.1 | Graph/embedding and ranker tests, plus stretched-candidate graph compatibility (`tests/test_shape_stretch_graph.py`) |
+| `Graph and ML / CPU` | Ubuntu, Python 3.11, CPU Torch 2.11.0, PyG 2.8.1 | Graph/embedding and ranker tests, plus stretched-candidate graph compatibility (`tests/test_shape_stretch_graph.py`) and the label-audit / pairwise-training mechanics (`tests/test_training.py`, `tests/test_blind_eval.py`; fixtures only, no real labels, checkpoints or GPU) and the shipped checkpoint through the real engine path on CPU (`tests/test_learned_selection_ml.py`) |
 | `Source generation / Renderer` | Ubuntu, Python 3.11, `requirements-dev.txt` + `requirements-sources.txt` | `tests/test_source_designs.py` (source generation, review/handoff, actual offline PNG rendering) and `tests/test_annotation.py` (tournament logic, SQLite, import/export, dev candidate generator, Gradio wiring); also installs `requirements-annotation.txt` |
 
 Jobs run independently. Core jobs have a 10-minute timeout; ML has 20 minutes.

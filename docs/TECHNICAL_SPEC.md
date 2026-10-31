@@ -123,7 +123,7 @@ source JSON + target_canvas
 
 The implemented production path builds and validates a candidate pool, scores valid snapshots,
 returns the highest-scoring valid design, and uses legacy repair only when none survives.
-Diversification applies separately to the training pool. Learned ranking is not integrated.
+Diversification applies separately to the training pool. Learned ranking is integrated only through the optional, fail-closed seam `engine/learned_selection.py` (checkpoint `engine/checkpoints/ranker_synth_weight_0.25_best.pt`); the deterministic winner is the fallback.
 
 ### 1.3 Architectural decisions
 
@@ -144,7 +144,7 @@ Diversification applies separately to the training pool. Learned ranking is not 
 | --- | --- | --- |
 | S02 parser/serializer/models | `engine/internal_schema.py` | **Implemented**; editing APIs `with_updates`, `with_layout` **Planned** (A.8) |
 | S03 graph builder, text-embedding cache, text-fit estimate | `engine/graph_features.py`, `engine/text_embeddings.py`, `engine/text_fit.py` (stdlib only) | **Implemented** (real pretrained encoder never loaded or evaluated) |
-| S03/S05 GATv2 ranker, checkpoints, scoring | `engine/ranker.py` | **Implemented**, untrained; no trained checkpoint exists |
+| S03/S05 GATv2 ranker, checkpoints, scoring | `engine/ranker.py` | **Implemented**; one trained checkpoint (synthetic-label weight 0.25) is shipped for `learned_selection`; offline pairwise accuracy only, see `data/creative_pilot_v1/training_v1/MODEL_SELECTION.md` |
 | S04 output validator | `engine/candidate_validator.py` | **Implemented** (limitations in §8.1.4) |
 | S04 iterative retry + proportional repair | `engine/layout_search.py` | **Implemented** |
 | S04 allowlisted candidate edits | `engine/layout_edits.py` (stdlib only) | **Implemented**; used by `baseline_proposal`; planned families must use it (§8.1.6) |
@@ -154,7 +154,7 @@ Diversification applies separately to the training pool. Learned ranking is not 
 | S05 tournament annotation UI, candidate-manifest import, comparison export | `annotation/` | **Implemented**, development only ([ANNOTATION_TOURNAMENT.md](ANNOTATION_TOURNAMENT.md)); no human labels yet |
 | S05 dev candidate generator (diagnostic, not S04) | `annotation/dev_candidates.py` | **Implemented**, development only |
 | S05 training, evaluation, family-disjoint splits | — | **Planned** (Appendix E) |
-| S06 `resize` adapter | `engine/resize.py` | **Implemented**: highest-scoring validated pool candidate, proportional fallback |
+| S06 `resize` adapter | `engine/resize.py` | **Implemented**: validated pool candidate preferred by the learned seam (`engine/learned_selection.py`, switch `CHAMELEON_RANKER=off`), else the highest-scoring validated pool candidate, else proportional fallback |
 | Preview renderer | `renderer/converter/` (vendored, used by `engine/main.py`) | **Implemented**; fidelity to the official scorer **Unresolved** (U9) |
 | CI | `.github/workflows/ci.yml`, `scripts/ci_tests.py` | **Implemented** ([CI.md](CI.md)) |
 
@@ -350,14 +350,14 @@ field. `generator_version` is stamped by the code, not configured.
 ## 6. S05 — Ranking and candidate selection
 
 **Status: Partial.** Deterministic scoring and pool selection are implemented. The learned scorer
-is implemented but untrained; training and learned production selection remain planned.
+is implemented and one checkpoint is trained and wired in through `engine/learned_selection.py` (re-ranks the validated retained candidates; any failure keeps the deterministic winner). A 30-task blind visual comparison found no measurable difference from the deterministic objective, so the benefit is unproven.
 
-### 6.1 Learned ranking — Implemented (untrained)
+### 6.1 Learned ranking — Implemented; one trained checkpoint, unproven benefit
 
 `score_candidates` (§2.3) returns one finite float per candidate in input order. Scores are comparable only
 across candidates of the same source and target; they are not calibrated probabilities. It requires a
 checkpoint whose training metadata declares `status="trained"`; otherwise it raises `CheckpointUnavailable`.
-Details and failure cases: Appendix C.2–C.4. **No trained checkpoint exists.**
+Details and failure cases: Appendix C.2–C.4. One trained checkpoint ships (`ranker_synth_weight_0.25_best.pt`); its quality advantage is not established.
 
 ### 6.2 Deterministic scorer - Implemented
 
@@ -697,7 +697,7 @@ Criteria for a change to be merge-ready, by component. Items marked (planned) ha
 
 ### 10.1 Known limitations
 
-- No trained checkpoint, human labels or measured aesthetic improvement; GNN output is not evidence of quality.
+- A trained checkpoint and human labels exist, but no measured aesthetic improvement: in a 30-task blind comparison the learned choice tied the deterministic objective (data/creative_pilot_v1/training_v1/MODEL_SELECTION.md). GNN output is not evidence of quality.
 - Text fit, wrapping and legibility are not measured; the advanced sample (728×90) can yield very small text under the proportional repair.
 - The text encoder `sentence-transformers/all-MiniLM-L6-v2` is optional and only proposed: it is **not** Adobe-approved (U8), and it has never been loaded or evaluated in this repository. The numeric-only graph and ranker path needs no encoder.
 - Python 3.10 execution and the Apple reference hardware are untested locally; hosted CI has not been confirmed by this document.

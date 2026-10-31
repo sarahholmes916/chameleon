@@ -14,7 +14,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from annotation import candidates, export, source_review, store, views, work_queue
+from annotation import ai_review_ui, candidates, export, source_review, store, views, work_queue
 from annotation.bracket import SIZES
 from annotation.candidates import REPO_ROOT
 
@@ -300,11 +300,12 @@ def build_app(db_path: Path | str, *, assignment_root: Path | None = None, defau
                  "FALSE ACCEPT" if r["false_accept"] else "rejected"] for r in rows]
 
     # ------------------------------------------------------------ layout
-    with gr.Blocks(title="Chameleon tournament annotation", css=views.CSS, js=views.SHORTCUT_JS) as demo:
+    with gr.Blocks(title="Chameleon tournament annotation", css=views.CSS, js=ai_review_ui.combined_js()) as demo:
         tid_state = gr.State(None)
         presented_state = gr.State(None)
         gr.Markdown("# Chameleon layout tournament\nPick the better resized layout. Dev tool — scores and generator identity are never shown.")
         with gr.Tabs() as tabs:
+            review_handles = ai_review_ui.add_review_tab(conn, default_annotator)
             with gr.Tab("Tournament", id="tab_tournament"):
                 gr.Markdown("Start the queue to load your generated layouts automatically. Source review is optional. "
                             "Finish each set to advance automatically; restart with the same button to resume.")
@@ -397,6 +398,8 @@ def build_app(db_path: Path | str, *, assignment_root: Path | None = None, defau
         outs = [tid_state, tournament_dd, focus_dd, header, bracket_view, left_view, right_view, btn_left, btn_tie, btn_bad,
                 btn_skip, btn_right, res_left, res_right, btn_redo, btn_undo, tags, status, presented_state, source_view, history]
         demo.load(on_load, None, outs)
+        _fn, _ins, _outs = review_handles["load"]
+        demo.load(_fn, _ins, _outs)
         start_queue.click(on_start_queue, [annotator, zoom], outs)
         reject_source_btn.click(on_reject_source, [tid_state, annotator, zoom], outs)
         common = [tid_state, presented_state, tags, annotator, queue, zoom]
@@ -437,6 +440,7 @@ def main(argv=None) -> int:
     parser.add_argument("--db", type=Path, default=Path(os.environ.get("CHAMELEON_ANNOTATION_DB", store.DEFAULT_DB)))
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--proposals", type=Path, action="append", default=[], help="proposals.jsonl to import into the AI-review tab (repeatable, idempotent)")
     parser.add_argument("--assignment", type=Path, help="Portable assignment folder; isolates data and annotator identity")
     args = parser.parse_args(argv)
     db = args.db if args.db.is_absolute() else REPO_ROOT / args.db
@@ -446,6 +450,12 @@ def main(argv=None) -> int:
         args.assignment = args.assignment.resolve()
         db, annotator_id = prepare_assignment(args.assignment)
     print(f"Annotation database: {db}")
+    if args.proposals:
+        from annotation import ai_review
+        c = store.connect(db)
+        for pth in args.proposals:
+            print("imported", pth, ai_review.import_proposals(c, pth if pth.is_absolute() else REPO_ROOT / pth) | {})
+        c.close()
     build_app(db, assignment_root=args.assignment, default_annotator=annotator_id).launch(
         server_name="127.0.0.1", server_port=args.port, inbrowser=not args.no_browser)
     return 0

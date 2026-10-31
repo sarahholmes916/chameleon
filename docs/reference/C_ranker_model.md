@@ -6,8 +6,9 @@
 > `score_candidates` signature and its place in the pipeline are defined in the main specification
 > (§2, §6). Input tensors are defined in [Appendix B](B_graph_features.md).
 
-Code: [engine/ranker.py](../../engine/ranker.py). The model is untrained infrastructure: there is no
-human preference dataset, trained quality checkpoint, or measured aesthetic improvement.
+Code: [engine/ranker.py](../../engine/ranker.py). Trained checkpoints now exist (`data/creative_pilot_v1/training_v1/`; the shipped one is
+`engine/checkpoints/ranker_synth_weight_0.25_best.pt`, graph_v3, numeric-only), trained with `training/`. There is still no measured
+aesthetic improvement: a blind comparison showed no difference from the deterministic objective (`MODEL_SELECTION.md`).
 
 ## C.1 Model and versions
 

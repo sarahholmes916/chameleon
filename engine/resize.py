@@ -32,6 +32,7 @@ from engine.candidate_generator import (
 from engine.candidate_pool import build_candidate_pool
 from engine.candidate_validator import validate_candidate
 from engine.internal_schema import Canvas, Design
+from engine.learned_selection import choose_candidate
 from engine.layout_search import baseline_proposal, find_valid_layout
 
 _logger = logging.getLogger(__name__)
@@ -70,8 +71,13 @@ def _select_batch_candidate(design: Design, target: Canvas) -> dict[str, Any] | 
     pool = build_candidate_pool(design, target, families=families)
     if pool.winner is None:
         return None
-    selected = pool.winner.to_adobe()
-    return selected if validate_candidate(design, selected, target).is_valid else None
+    # The learned choice only reorders candidates that already validated; no opinion -> deterministic winner.
+    preferred = choose_candidate(design, target, pool)
+    for chosen in (preferred, pool.winner) if preferred is not None else (pool.winner,):
+        selected = chosen.to_adobe()
+        if validate_candidate(design, selected, target).is_valid:
+            return selected
+    return None
 
 
 

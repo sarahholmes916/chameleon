@@ -51,7 +51,7 @@ Paths marked *Planned* do not exist; confirm against the checkout before relying
 | `engine/internal_schema.py` (S02) | Developer 1 now; extensions Developer 2 | all | Implemented |
 | S02 `with_updates` / `with_layout` | Developer 2 | Developer 1 | Planned |
 | `engine/graph_features.py`, `engine/text_embeddings.py` | Developer 1 | ranker | Implemented |
-| `engine/ranker.py` | Developer 1 | integration | Implemented (untrained) |
+| `engine/ranker.py` | Developer 1 | integration | Implemented; one trained checkpoint shipped via `engine/learned_selection.py` (no proven quality gain) |
 | `engine/candidate_validator.py`, `engine/layout_search.py` | Developer 2 | all | Implemented (output gate, proportional repair) |
 | `engine/candidate_generator.py`, `engine/layout_units.py`, `engine/layout_objective.py`, `engine/diversify.py` | Developer 2 | Developer 1 | Planned |
 | Deterministic scorer (`score_deterministic`, D.1.5) and its calibration (D.1.6) | Developer 2 implements and maintains | Developer 1 (`rank_candidates`, baseline comparison) | Planned (location undecided) |
@@ -138,11 +138,11 @@ This is the only milestone numbering in the repository.
 
 - [x] GATv2 architecture; forward/backward on CPU (CUDA when available).
 - [x] Versioned checkpoints; batched scoring with explicit failure behavior.
-- [ ] Simple learned baseline; held-out pairwise metrics.
-- [ ] GNN trained on human preferences.
-- [ ] Compare GNN to deterministic ranking on the same valid candidate sets.
+- [x] Simple learned baseline; held-out pairwise metrics (`training/`, `data/creative_pilot_v1/training_v1/TRAINING_REPORT.md`).
+- [x] GNN trained on human preferences (family-disjoint splits; original-only, combined, and synthetic-weighted 0.25/0.5/0.75 runs).
+- [x] Compare GNN to deterministic ranking on the same candidate sets: offline pairwise accuracy higher, but a 30-task blind visual comparison showed **no measurable difference** (`MODEL_SELECTION.md`). An S04-only-pool comparison is still open.
 - [ ] Compare `graph_v3` and `graph_v4` rankers on human labels, including font-size-differing pairs (overflow, unreadably small, appropriate); `graph_v4` becomes the default only if the team's pre-written rule is met ([spec B.7.3](reference/B_graph_features.md#b73-still-required-before-the-default-changes-or-any-improvement-is-claimed)).
-- [ ] Implement `rank_candidates` (Developer 1) with the deterministic fallback and its tests, then connect it to selection.
+- [x] Learned choice connected to selection with a fail-closed deterministic fallback: `engine/learned_selection.py` (a narrower seam than the proposed `rank_candidates`, which remains unimplemented); Docker image builds and runs offline.
 - [ ] Test validity, retention, extreme canvases, runtime, end-to-end human preference.
 - [ ] Diverse top-K internal alternatives while `resize` returns one design.
 

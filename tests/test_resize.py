@@ -30,6 +30,12 @@ FAMILY_FUNCTIONS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def deterministic_baseline(monkeypatch):
+    """These tests define the deterministic objective path; the optional learned choice has its own tests."""
+    monkeypatch.setenv("CHAMELEON_RANKER", "off")
+
+
 def load_task(name):
     task = json.loads((INPUT_DIR / name).read_text(encoding="utf-8"))
     return (
@@ -68,7 +74,7 @@ def test_no_ml_dependencies_by_ast():
         "logging", "collections.abc", "typing",
         "engine.candidate_generator", "engine.candidate_validator",
         "engine.internal_schema", "engine.layout_objective",
-        "engine.layout_search", "engine.candidate_pool",
+        "engine.layout_search", "engine.candidate_pool", "engine.learned_selection",
     }
 
 

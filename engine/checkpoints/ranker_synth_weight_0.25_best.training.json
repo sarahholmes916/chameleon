@@ -1,0 +1,21 @@
+{
+ "lam": 0.25,
+ "original_weight": 1.0,
+ "feature_version": "graph_v3",
+ "hyperparameters": {
+  "optimizer": "AdamW",
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "batch_pairs": 32,
+  "grad_clip": 1.0,
+  "max_epochs": 100,
+  "patience": 12,
+  "dropout": 0.1,
+  "loss": "BCEWithLogits(s_a - s_b, y)",
+  "ties_and_both_bad": "excluded from the loss"
+ },
+ "seed": 42,
+ "device": "cuda",
+ "selection": "best weighted validation accuracy among seeds",
+ "note": "GPU scatter ops use atomics: reruns are statistically, not bit-wise, reproducible."
+}
