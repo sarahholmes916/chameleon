@@ -52,13 +52,24 @@ unvalidated draft (see [Limitations](#limitations)).
 
 ## How it works
 
-```text
-source JSON + target canvas
-  -> lossless internal Design                               engine/internal_schema.py
-  -> candidate pool (generate, then validate and score)     engine/candidate_pool.py
-  -> deterministic winner; optional learned re-ranking      engine/learned_selection.py
-  -> re-validate the chosen layout -> {canvas, elements}    engine/resize.py
-  (pool empty or error -> proportional fit, bounded repair) engine/layout_search.py
+```mermaid
+flowchart TD
+    IN["Input<br/>source design + target canvas"] --> PARSE["Parse<br/>lossless immutable Design<br/>engine/internal_schema.py"]
+    PARSE --> GEN["Generate candidates (deterministic)<br/>scale baseline, horizontal flow, vertical stack,<br/>hero left/right, two-column, controlled overlay,<br/>banner zones for wide targets<br/>engine/candidate_generator.py"]
+    GEN --> POST["Post-passes<br/>shape stretching + bounded local refinement<br/>only x, y, width, height, font_size may change"]
+    POST --> VAL{"Validate: hard gate<br/>engine/candidate_validator.py"}
+    VAL -- "invalid" --> DROP["Discarded, never returned"]
+    VAL -- "valid" --> SCORE["Score + de-duplicate<br/>10-term deterministic objective<br/>keep up to 12 distinct valid layouts<br/>engine/candidate_pool.py"]
+    SCORE --> WIN["Deterministic winner<br/>highest score"]
+    SCORE -.-> ML["Learned ranker (optional)<br/>GATv2 re-orders the retained candidates<br/>engine/learned_selection.py"]
+    ML -. "no opinion on any failure<br/>CHAMELEON_RANKER=off" .-> WIN
+    ML --> PICK["Chosen layout"]
+    WIN --> PICK
+    PICK --> RECHECK{"Re-validate<br/>engine/resize.py"}
+    RECHECK -- "valid" --> OUT["Output<br/>canvas + elements JSON<br/>and rendered PNG"]
+    RECHECK -- "invalid or pool empty" --> FALL["Fallback: proportional fit<br/>with bounded repair/retry<br/>engine/layout_search.py"]
+    FALL -- "valid" --> OUT
+    FALL -- "budget exhausted" --> ERR["NoFeasibleLayout raised<br/>no draft is returned"]
 ```
 
 1. **Parse.** The input is read into an immutable `Design` that round-trips losslessly (optional-field absence vs
