@@ -170,7 +170,7 @@ agreement with the official scorer and renderer; any improvement in visual quali
   ([docs/S04_EVALUATION.md](docs/S04_EVALUATION.md)).
 - The preview renderer's fidelity to the official scoring renderer is unconfirmed. The Apple M5 Pro reference machine's
   limits are unspecified; the image is `linux/amd64` and about 2.4 GB because it contains CPU PyTorch.
-- On `NoFeasibleLayout` the whole batch stops (no per-task failure policy is implemented).
+- On `NoFeasibleLayout` (or any `resize()` error) only that task is skipped with a `FAILED` line; the batch continues, prints a summary, and exits 0 if any task succeeded.
 - The validator is stricter than Adobe's published text in places (bleed, rotation, stroke); open rule questions are in
   [Appendix F](docs/reference/F_submission_and_adobe_questions.md). The stage-one viewer add-on listed in `FAQ.md` is
   **not built**.

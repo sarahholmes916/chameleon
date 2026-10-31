@@ -194,16 +194,16 @@ def test_resize_boundary_propagates_search_failure(monkeypatch):
         resize(raw, raw["canvas"])
 
 
-def test_cli_does_not_write_or_render_a_failed_task(monkeypatch, tmp_path):
-    import engine.main as main_module
+_BAD_TARGET = {"width": 13, "height": 17}
+
+
+def _write_task(input_dir, name, raw, target=None):
+    (input_dir / name).write_text(json.dumps(
+        {"source": raw, "target_canvas": raw["canvas"] if target is None else target}))
+
+
+def _force_resize_failure(monkeypatch):
     import engine.resize as resize_module
-    input_dir = tmp_path / "input"
-    output_dir = tmp_path / "output"
-    input_dir.mkdir()
-    raw = design_json()
-    (input_dir / "task.json").write_text(json.dumps({"source": raw, "target_canvas": raw["canvas"]}))
-    monkeypatch.setattr(main_module, "INPUT_DIR", input_dir)
-    monkeypatch.setattr(main_module, "OUTPUT_DIR", output_dir)
     monkeypatch.setattr(resize_module, "baseline_proposal", lambda *_: {})
     monkeypatch.setattr(resize_module, "baseline_candidate", _raise_proposal)
     monkeypatch.setattr(resize_module, "horizontal_flow_candidates", _raise_proposal)
@@ -213,12 +213,115 @@ def test_cli_does_not_write_or_render_a_failed_task(monkeypatch, tmp_path):
     monkeypatch.setattr(resize_module, "banner_zones_candidates", _raise_proposal)
     monkeypatch.setattr(resize_module, "two_column_candidates", _raise_proposal)
     monkeypatch.setattr(resize_module, "controlled_overlay_candidates", _raise_proposal)
+
+
+def _fail_bad_target_only(monkeypatch):
+    import engine.main as main_module
+    real_resize = main_module.resize
+
+    def selective_resize(source, target_canvas):
+        if target_canvas == _BAD_TARGET:
+            raise RuntimeError("synthetic failure")
+        return real_resize(source, target_canvas)
+
+    monkeypatch.setattr(main_module, "resize", selective_resize)
+    return real_resize
+
+
+def test_cli_does_not_write_or_render_a_failed_task(monkeypatch, tmp_path, capsys):
+    import engine.main as main_module
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    raw = design_json()
+    _write_task(input_dir, "task.json", raw)
+    monkeypatch.setattr(main_module, "INPUT_DIR", input_dir)
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", output_dir)
+    _force_resize_failure(monkeypatch)
     rendered = []
     monkeypatch.setattr(main_module, "render_to_png", lambda *args: rendered.append(args))
-    with pytest.raises(NoFeasibleLayout):
-        main_module.main()
+    exit_code = main_module.main()
+    assert exit_code == main_module.NO_SUCCESS_EXIT_CODE
+    assert exit_code != 0
     assert list(output_dir.iterdir()) == []
     assert rendered == []
+    out = capsys.readouterr().out
+    assert "[task.json] FAILED: NoFeasibleLayout:" in out
+    assert "Summary: 0 ok, 1 failed" in out
+    assert "task.json" in out.rsplit("Summary:", 1)[1]
+
+
+def test_cli_continues_after_failure_and_writes_success(monkeypatch, tmp_path, capsys):
+    import engine.main as main_module
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    raw = design_json()
+    _write_task(input_dir, "a_bad.json", raw, _BAD_TARGET)
+    _write_task(input_dir, "b_good.json", raw)
+    monkeypatch.setattr(main_module, "INPUT_DIR", input_dir)
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", output_dir)
+    real_resize = _fail_bad_target_only(monkeypatch)
+    rendered = []
+
+    def fake_render(design, assets_dir, png_path):
+        rendered.append(Path(png_path).name)
+        Path(png_path).write_bytes(b"fake-png")
+
+    monkeypatch.setattr(main_module, "render_to_png", fake_render)
+    exit_code = main_module.main()
+    assert exit_code == 0
+    assert json.loads((output_dir / "b_good_output.json").read_text()) == real_resize(raw, raw["canvas"])
+    assert (output_dir / "b_good_output.png").exists()
+    assert not (output_dir / "a_bad_output.json").exists()
+    assert not (output_dir / "a_bad_output.png").exists()
+    assert rendered == ["b_good_output.png"]
+    out = capsys.readouterr().out
+    assert "[a_bad.json] FAILED: RuntimeError: synthetic failure" in out
+    assert "[b_good.json] OK" in out
+    assert "Summary: 1 ok, 1 failed" in out
+
+
+def test_cli_all_tasks_failing_returns_nonzero(monkeypatch, tmp_path, capsys):
+    import engine.main as main_module
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    raw = design_json()
+    _write_task(input_dir, "a.json", raw)
+    _write_task(input_dir, "b.json", raw)
+    monkeypatch.setattr(main_module, "INPUT_DIR", input_dir)
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", output_dir)
+    _force_resize_failure(monkeypatch)
+    rendered = []
+    monkeypatch.setattr(main_module, "render_to_png", lambda *args: rendered.append(args))
+    exit_code = main_module.main()
+    assert exit_code == main_module.NO_SUCCESS_EXIT_CODE
+    assert exit_code != 0
+    assert list(output_dir.iterdir()) == []
+    assert rendered == []
+    out = capsys.readouterr().out
+    assert "[a.json] FAILED: NoFeasibleLayout:" in out
+    assert "[b.json] FAILED: NoFeasibleLayout:" in out
+    assert "Summary: 0 ok, 2 failed" in out
+
+
+def test_cli_summary_lists_failed_task_names(monkeypatch, tmp_path, capsys):
+    import engine.main as main_module
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    raw = design_json()
+    _write_task(input_dir, "a_bad.json", raw, _BAD_TARGET)
+    _write_task(input_dir, "b_good.json", raw)
+    monkeypatch.setattr(main_module, "INPUT_DIR", input_dir)
+    monkeypatch.setattr(main_module, "OUTPUT_DIR", output_dir)
+    _fail_bad_target_only(monkeypatch)
+    monkeypatch.setattr(main_module, "render_to_png", lambda *args: None)
+    assert main_module.main() == 0
+    out = capsys.readouterr().out
+    summaries = [line for line in out.splitlines() if line.startswith("Summary:")]
+    assert summaries == ["Summary: 1 ok, 1 failed [failed: a_bad.json]"]
 
 
 # --- Stage-1 property preservation (docs/TECHNICAL_SPEC.md K6 and 8.1.6) ---
