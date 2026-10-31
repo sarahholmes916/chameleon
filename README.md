@@ -47,7 +47,7 @@ A harmless `Fontconfig warning: ... unknown element "reset-dirs"` may also print
 ```
 
 `<task>_output.png` is that design rendered by the vendored Adobe preview renderer (`renderer/`). If no valid layout
-exists for a task, the engine raises `NoFeasibleLayout`, writes nothing for that task and stops; it never returns an
+exists for a task, the engine raises `NoFeasibleLayout`, writes nothing for that task and prints a FAILED line and continues with the remaining tasks; it never returns an
 unvalidated draft (see [Limitations](#limitations)).
 
 ## How it works
