@@ -160,8 +160,8 @@ def main():
     for c in comps:
         if c["label"] in ("A_BETTER", "B_BETTER") and c["preferred_candidate_id"]:
             w = c["preferred_candidate_id"]
-            l = c["candidate_b_id"] if w == c["candidate_a_id"] else c["candidate_a_id"]
-            gw, gl = geo.get(w), geo.get(l)
+            loser = c["candidate_b_id"] if w == c["candidate_a_id"] else c["candidate_a_id"]
+            gw, gl = geo.get(w), geo.get(loser)
             if gw and gl and gw["min_font"] and gl["min_font"]:
                 diffs.append((gw["min_font"] - gl["min_font"], gw["content_area_frac"] - gl["content_area_frac"]))
     if diffs:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from annotation import ai_review, store, views
+from annotation import ai_review, views
 from annotation.candidates import REPO_ROOT
 
 TARGETS = ["All", "1600x400", "728x90", "90x728"]

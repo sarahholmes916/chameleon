@@ -56,7 +56,7 @@ def _resolve(path, base):
 def import_proposals(conn, path: Path | str, base: Path = REPO_ROOT) -> dict:
     """Idempotent. Rejects (and reports) proposals whose candidate or preview files are missing. Existing rows are kept."""
     ensure_schema(conn)
-    rows = [json.loads(l) for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
+    rows = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
     start = conn.execute("SELECT COALESCE(MAX(seq),0) FROM ai_proposals").fetchone()[0]
     imported, existing, rejected = 0, 0, []
     with tx(conn):
